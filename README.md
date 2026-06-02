@@ -5,7 +5,7 @@
 
 > 设计与分阶段路线见 [`docs/plans/2026-06-02-mlir-vta-phase1-gemm.md`](docs/plans/2026-06-02-mlir-vta-phase1-gemm.md)。
 
-## 当前状态：第一阶段完成
+## 当前状态：第一阶段完成；第二阶段 🚧 进行中（linalg 入口·16×16 单块已落地）
 
 打通了「**MLIR → VTA ISA 二进制**」的最小闭环，对 16×16 GEMM 与 Python 编译器输出 **字节级一致**，并通过功能仿真器（FSIM）端到端验证。
 
