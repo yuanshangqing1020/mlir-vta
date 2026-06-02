@@ -165,13 +165,16 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
   std::vector<uint8_t> insnBuf;
   std::vector<uint8_t> uopBuf;
 
-  for (Operation &op : module.getBody()->getOperations()) {
+  LogicalResult walkResult = success();
+  module.walk([&](Operation *opPtr) -> WalkResult {
+    Operation &op = *opPtr;
     if (auto u = dyn_cast<UopTableOp>(op)) {
       ArrayAttr dst = u.dst(), src = u.src(), wgt = u.wgt();
       if (dst.size() != src.size() || dst.size() != wgt.size()) {
         u.emitError("vta.uop_table dst/src/wgt arrays must have equal length (")
             << dst.size() << ", " << src.size() << ", " << wgt.size() << ")";
-        return failure();
+        walkResult = failure();
+        return WalkResult::interrupt();
       }
       size_t n = dst.size();
       for (size_t i = 0; i < n; ++i) {
@@ -260,10 +263,14 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
       // Unhandled (e.g. high-level vta.gemm) op: refuse to silently drop it.
       op.emitOpError("unhandled vta/vtaisa op in binary emitter; lower it "
                      "before translation");
-      return failure();
+      walkResult = failure();
+      return WalkResult::interrupt();
     }
     // Other ops are ignored.
-  }
+    return WalkResult::advance();
+  });
+  if (failed(walkResult))
+    return failure();
 
   std::string insnPath = (outDir + "/instructions.bin").str();
   std::string uopPath = (outDir + "/uop.bin").str();

@@ -3,6 +3,7 @@
 #include "mlir-vta/Target/VTABinaryEmitter.h"
 #include "mlir-vta/Target/VTADataEmitter.h"
 
+#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser.h"
@@ -35,6 +36,9 @@ int main(int argc, char **argv) {
   }
 
   mlir::MLIRContext context;
+  // Standard dialect provides `std.return`, needed to parse func-wrapped IR
+  // (FuncOp itself is builtin). The VTA dialects supply the ops we emit.
+  context.getOrLoadDialect<mlir::StandardOpsDialect>();
   context.getOrLoadDialect<mlir::vta::VTADialect>();
   context.getOrLoadDialect<mlir::vtaisa::VTAISADialect>();
 
