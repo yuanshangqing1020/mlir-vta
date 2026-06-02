@@ -21,4 +21,6 @@ set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
 
 add_subdirectory(include/mlir-vta/Dialect/VTA)
 add_subdirectory(lib/Dialect/VTA)
+add_subdirectory(lib/Target)
 add_subdirectory(tools/vta-opt)
+add_subdirectory(tools/vta-translate)
