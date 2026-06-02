@@ -12,9 +12,9 @@
 已实现：
 
 - **两个 dialect**
-  - 高层 `vta`：张量级算子 `vta.gemm`（`m`/`n`/`k` 属性）
+  - 高层 `vta`：张量级算子 `vta.gemm`（memref operand 形态 `ins(%lhs, %rhs) outs(%acc)`，`m,n,k` 由 16×16 operand 形状推导）
   - 低层 `vtaisa`：与 128-bit 宏指令 / 32-bit UOP 一一对应的 ISA op：`vtaisa.load`、`vtaisa.store`、`vtaisa.gemm_insn`、`vtaisa.alu_insn`、`vtaisa.finish`、`vtaisa.uop_table`
-- **`-lower-vta-gemm` pass**：把单块 `vta.gemm{m=16,n=16,k=16}` 展开为完整的 11 条 `vtaisa` ISA 指令 + UOP 表（非 16×16×16 输入会报错）
+- **`-lower-vta-gemm` pass**：把单块 `vta.gemm ins(%lhs, %rhs : memref<16x16xi32>, memref<16x16xi32>) outs(%acc : memref<16x16xi32>)` 展开为完整的 11 条 `vtaisa` ISA 指令 + UOP 表（ODS verifier 仅认 16×16）
 - **`vta-translate`**：把低层 `vtaisa` MLIR 发射为 `instructions.bin` / `uop.bin`，以及（`--emit-data`）数据 bin 与 `metadata/memory_addresses/layers_name` CSV，全部与 Python 编译器字节一致
 
 尚未实现（后续阶段）：通用维度 GEMM 的 tiling、依赖信号量自动推导、ALU/卷积的 lowering、ONNX 前端（`onnx-mlir`）、整网。

@@ -61,7 +61,7 @@ flowchart TD
 | 阶段 | 范围 | 状态 |
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
-| **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization（对齐 `dram_allocation`）；通用维度 GEMM | 规划中 |
+| **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization（对齐 `dram_allocation`）；通用维度 GEMM | 🚧 进行中（linalg 入口·16×16 单块已落地）|
 | **三** | 依赖信号量自动推导 pass；ALU（ReLU/池化）lowering；大矩阵 `matrix_partitioning` 等价的 tiling 策略 | 规划中 |
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
@@ -69,7 +69,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    HL["vta.gemm {m,n,k}"]
+    HL["vta.gemm ins(lhs,rhs) outs(acc)"]
     LL["低层 vtaisa op 序列<br/>(uop_table + 11 条指令)"]
     BINS["instructions.bin / uop.bin"]
     DATA["input/weight/accumulator/out_init.bin<br/>+ 3 个 CSV"]
@@ -109,7 +109,7 @@ flowchart LR
 - 所有 ISA 字段都是命名属性，名称与 ISA 字段、Python 编译器字段**三处同名**（如 `dst_factor_out`、`x_pad_left`），交叉对照成本最低；
 - `assemblyFormat = "attr-dict"`，文本形态就是属性字典，round-trip 直观。
 
-它们按出现顺序排列在 module body 里，发射器顺序遍历即得指令流（见 §5）。
+它们按出现顺序排列（阶段一在 module body、阶段二起可嵌套于 `func` body），发射器用 `module.walk` 递归按序遍历即得指令流（见 §5）。
 
 ### 3.3 低层 `vtaisa` op 字段一览
 
@@ -147,7 +147,18 @@ flowchart LR
 
 ### 3.6 高层 `vta.gemm`
 
-阶段一引入的高层算子，仅带 `m`/`n`/`k` 三个 `I64Attr`，表示一次（当前限定 16×16×16）矩阵乘。它是 lowering 的输入；阶段二会扩展其语义（接收 memref/tensor operand、支持任意维度），并由 tiling 决定如何切成 16×16 块。
+阶段一引入的高层算子，阶段二（linalg 入口）已改为 **memref operand 形态**：
+
+```mlir
+vta.gemm ins(%lhs, %rhs : memref<16x16xi32>, memref<16x16xi32>)
+         outs(%acc : memref<16x16xi32>)
+```
+
+- operand 顺序为 `lhs, rhs, acc`（`ins(lhs, rhs) outs(acc)`），`acc` 为 out-param 语义、无 SSA result；
+- `m,n,k` 不再是属性，而是**由 operand 形状推导**；
+- ODS verifier 强制三个 operand 均为 `16×16`，非此尺寸在 IR 层即报错（取代了阶段一的 `vta.gemm {m,n,k}` 属性形态，该属性形态已废弃）。
+
+它是 lowering 的输入；通用化阶段会放开 verifier、支持任意维度，并由 tiling 决定如何切成 16×16 块。
 
 ---
 
@@ -214,7 +225,7 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 
 ### 5.4 遍历与 fail-loud
 
-`emitBinary` 顺序遍历 `module.getBody()`：
+`emitBinary` 用 `module.walk` **递归遍历**整个 module（阶段二起，`vtaisa.*` op 可能嵌套在 `func` body 内，而非平铺在 module body）：
 - `vtaisa.uop_table` → 校验三数组等长（否则 `emitError` + `failure()`），逐条 `packUop` 追加到 `uopBuf`；
 - `vtaisa.load/store/gemm_insn/alu_insn` → 读对应 op 的属性访问器（LLVM 13 为 snake_case，如 `l.dram_base()`、`l.buffer_id()`），pack 后 16 字节追加到 `insnBuf`；
 - `vtaisa.finish` → 全零 `packMem(opcode=3)`；
@@ -250,7 +261,7 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 文件：[`lib/Transforms/LowerVTAGemm.cpp`](../lib/Transforms/LowerVTAGemm.cpp)，声明 [`VTAPasses.h`](../include/mlir-vta/Dialect/VTA/VTAPasses.h)。
 
 - 形态：`PassWrapper<LowerVTAGemmPass, OperationPass<ModuleOp>>`，命令行参数 `-lower-vta-gemm`（由 `registerVTAPasses()` 注册，`vta-opt` 启动时调用）。
-- 逻辑：`module.walk` 收集所有 `vta::GemmOp`；对每个先守卫 `m==n==k==16`（否则 `emitError` + `signalPassFailure`），再用 `OpBuilder` 在原位按固定顺序创建 `uop_table` + 11 条低层 op + `finish`，最后 `g.erase()`。
+- 逻辑：`module.walk` 收集所有 `vta::GemmOp`；尺寸约束（16×16×16）已由 `vta.gemm` 的 ODS verifier 在 IR 层保证（`m,n,k` 来自 operand 形状），pass 直接用 `OpBuilder` 在原位按固定顺序创建 `uop_table` + 11 条低层 op + `finish`，最后 `g.erase()`。
 - 生成的 11 条指令字段（含依赖位、`dram_base` 等）直接取自 Python 编译器对 16×16 GEMM 的输出（对应 `memory_addresses.csv` 的地址布局）。
 
 ### 7.1 当前限制 vs 阶段二通用化
@@ -277,8 +288,8 @@ flowchart LR
 
 | 工具 | 文件 | 作用 |
 |------|------|------|
-| `vta-opt` | [`tools/vta-opt/vta-opt.cpp`](../tools/vta-opt/vta-opt.cpp) | 注册 `vta` + `vtaisa` 两个 dialect 与 pass 的 `mlir-opt` 变体；跑 `-lower-vta-gemm`、round-trip |
-| `vta-translate` | [`tools/vta-translate/vta-translate.cpp`](../tools/vta-translate/vta-translate.cpp) | 解析 `.mlir` → `emitBinary`（+ `--emit-data` → `emitData`） |
+| `vta-opt` | [`tools/vta-opt/vta-opt.cpp`](../tools/vta-opt/vta-opt.cpp) | `mlir-opt` 变体；注册 `vta` + `vtaisa` 两个 dialect 及其 pass，并 `registerAllDialects`/`registerAllPasses` 全部上游能力（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等）；跑 `-lower-vta-gemm`、`--convert-linalg-to-vta`、round-trip |
+| `vta-translate` | [`tools/vta-translate/vta-translate.cpp`](../tools/vta-translate/vta-translate.cpp) | 解析 `.mlir` → `emitBinary`（+ `--emit-data` → `emitData`）；同样注册全部上游 dialect，以便解析降级后残留的 `memref.alloc`/`linalg.fill`/`linalg.copy`/`std.return` 等算子 |
 
 `vta-translate` CLI：`vta-translate <input.mlir> -o <outDir> [--emit-data --input <inp.bin> --weight <wgt.bin>]`。用 LLVM 13 的 `mlir::parseSourceFile<ModuleOp>`（头文件 `mlir/Parser.h`）。
 
@@ -299,6 +310,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 | 数据/CSV 字节级 | `cmp` 对比 Python 重新生成的输出 | `scripts/make_golden.sh` |
 | 端到端 | lower → translate → `cmp` 黄金参考 | `test/Target/lower_gemm.mlir` |
 | 仿真 | 喂 FSIM 跑出结果矩阵 + profiler | `scripts/run_fsim.sh` |
+| linalg 端到端（阶段二）| `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，自校验结果矩阵等于黄金 | `scripts/run_fsim_linalg.sh`、`test/golden/fsim_result_16x16.txt` |
 
 黄金参考由 [`scripts/make_golden.sh`](../scripts/make_golden.sh) 用**固定随机种子**调用 Python 编译器生成并提交到 `test/golden/`，保证可复现。指令序列与数据值无关（确定性），故可作字节基线。
 
@@ -308,7 +320,46 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 
 ### 10.1 阶段二：`linalg.matmul → vta.gemm` + tiling + bufferization
 
-- 扩展 `vta.gemm` 接收 `memref`/`tensor` operand 与任意 `m,n,k`。
+详细设计见 [`superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md`](superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md)；Task 0 spike 决策见 [`superpowers/plans/_spike_bufferize_notes.md`](superpowers/plans/_spike_bufferize_notes.md)。
+
+#### 已落地（linalg 入口·16×16 单块）
+
+本阶段先打通「`linalg.matmul`（tensor）→ tile → bufferize → `vta.gemm` → lower → translate → FSIM」的**单 16×16 块**端到端链路：
+
+- **`vta.gemm` 改为 memref operand 形态**：`ins(%lhs, %rhs : memref<16x16xi32>, memref<16x16xi32>) outs(%acc : memref<16x16xi32>)`（operand 顺序 lhs, rhs, acc），`m,n,k` 由 operand 形状推导，ODS verifier 拒绝非 16×16（详见 §3.6，取代旧的 `vta.gemm {m,n,k}` 属性形态）。
+- **新增 `--convert-linalg-to-vta` pass**：把已 bufferize（memref 语义）的 `linalg.matmul` 改写为 `vta.gemm`；若尚未 bufferize（仍是 tensor 语义）则报错。
+- **`vta-opt` 注册全部上游 dialect/pass**（`registerAllDialects`/`registerAllPasses`），从而直接可用 `-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等上游 pass。
+- **`vta-translate` 也注册全部上游 dialect**（原计划未列、实测必需）：这样它能**解析**降级后 IR 里残留的 bufferization 算子（`memref.alloc`、`linalg.fill`、`linalg.copy`、`std.return`）；发射器改为用 `module.walk` **递归遍历**，忽略非 `vta`/`vtaisa` 的 op，使嵌套在 `func` 内的 `vtaisa.*` op 也能被正确发射。
+- **端到端 pass 序列（Task 0 spike 方案 2 = tile-on-tensors → bufferize，已在 LLVM 13.0.0 确认）：**
+
+```bash
+vta-opt matmul_tensor.mlir \
+  --linalg-tile="linalg-tile-sizes=16,16,16" \
+  --linalg-bufferize --tensor-bufferize --tensor-constant-bufferize \
+  --func-bufferize --finalizing-bufferize \
+  --convert-linalg-to-vta --canonicalize --lower-vta-gemm \
+| vta-translate --emit-data ...   # → FSIM
+```
+
+  单块情形下 tile size 等于矩阵维度（16×16×16），故 `--canonicalize` 把退化的单 tile 循环折掉、**无残留 `scf.for`**；`vta.gemm` 直接位于 `func` body。（注：本机 `mlir-opt`/`vta-opt` 未注册 `arith` dialect，故 tensor 入口用 std 风格的 `constant 0 : i32` 而非 `arith.constant`。）
+
+- **Task 0 spike 决策**：方案 2（在 tensor 上 tile 再 bufferize）一次成功，**无需回退到方案 1**；最终 pass 序列即上方所示。
+- **验收**：新增 [`scripts/run_fsim_linalg.sh`](../scripts/run_fsim_linalg.sh) 跑完整管线 + FSIM，并**自校验** FSIM 结果矩阵等于阶段一已提交的黄金参考（`test/golden/fsim_result_16x16.txt`），不一致即非零退出。阶段二结果矩阵与阶段一**字节一致**；`instructions.bin`/`uop.bin` 亦与黄金参考字节一致。
+
+#### 数值约定边界（spec §8）
+
+本阶段 `linalg.matmul` 仅作为**被识别的标记**（pattern match 入口），其数学约定（`A·B`）与 VTA 的 `INP·WGTᵀ` + 磁盘转置布局（见 §6 `weight.bin` 转置）之间的对应关系，留给**通用化阶段**统一处理；当前单块路径靠复用阶段一的黄金数据布局保证字节一致。
+
+#### 仍未做（留待通用化阶段）
+
+- 多块 / 通用 `m,n,k`（放开 verifier、真正的多 tile + K 维 reduce）；
+- 地址分配 pass（复刻 `dram_allocation`，产出 `memory_addresses.csv`）；
+- 依赖信号量自动推导（见 §10.2）；
+- ALU lowering（见 §10.3）。
+
+#### 通用化阶段的设计方向（沿用原阶段二/三规划）
+
+- 扩展 `vta.gemm`/lowering 接收任意 `m,n,k`。
 - 用 MLIR 上游 `linalg` tiling 把大 matmul 切成 16×16 块、K 维 reduce；tile size 由硬件配置（`LOG_BLOCK` 等，建模为 dialect 级属性）决定。
 - 新增**地址分配 pass**，复刻 `dram_allocation`：按 4 KiB 页对齐为 INP/WGT/ACC/OUT/UOP/INSN 排物理/逻辑地址，产出 `memory_addresses.csv`。
 - 用 `bufferization` 把 tensor 语义降到 memref，与 SRAM/DRAM 缓冲对应。
@@ -337,11 +388,12 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 
 | 项 | 说明 | 计划 |
 |----|------|------|
-| `LowerVTAGemm` 仅支持 16×16×16 | 单块硬编码；非此尺寸报错 | 阶段二通用化 |
+| `LowerVTAGemm` 仅支持 16×16×16 | 单块硬编码 | 通用化阶段（阶段二后续）|
+| `vta.gemm` 的 `m,n,k` 来自 operand 形状，verifier 仅认 16×16 | 阶段二落地为单块 memref 形态 | 通用化阶段放开 |
 | 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 阶段三补 op verifier |
 | `alu_insn` 无 lowering/测试覆盖 | op 与发射器已实现但未被使用 | 阶段三 ALU lowering |
 | 无 `lit`/CTest 装配 | 测试靠脚本 `cmp`/`grep` 手跑 | 可选：加最小 lit 配置 |
-| 数据发射器仅单块 16×16 | `emitData` 写死维度与零填充 | 阶段二随分块通用化 |
+| 数据发射器仅单块 16×16 | `emitData` 写死维度与零填充 | 通用化阶段（阶段二后续）|
 
 ---
 
@@ -359,7 +411,9 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 | `lib/Target/VTABinaryEmitter.cpp` | 指令/UOP 位域打包与发射 |
 | `lib/Target/VTADataEmitter.cpp` | 数据 bin + CSV 发射 |
 | `lib/Transforms/LowerVTAGemm.cpp` | 单块 `vta.gemm` → `vtaisa.*` 展开 pass |
+| `lib/Transforms/ConvertLinalgToVTA.cpp` | `--convert-linalg-to-vta`：bufferized `linalg.matmul` → `vta.gemm` |
 | `tools/vta-opt/` `tools/vta-translate/` | 命令行工具 |
 | `test/` | round-trip、字节级用例、黄金 fixtures |
-| `scripts/make_golden.sh` `scripts/run_fsim.sh` | 黄金参考生成、FSIM 端到端 |
+| `scripts/make_golden.sh` `scripts/run_fsim.sh` `scripts/run_fsim_linalg.sh` | 黄金参考生成、FSIM 端到端、linalg 入口端到端验收 |
+| `docs/superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md` | 阶段二（linalg 入口）详细设计 |
 | `docs/plans/2026-06-02-mlir-vta-phase1-gemm.md` | 阶段一实施计划（含黄金参考与位域规范） |
