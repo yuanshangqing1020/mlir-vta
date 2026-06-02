@@ -24,8 +24,25 @@ cp "$OUT"/instructions.bin "$OUT"/uop.bin "$OUT"/input.bin "$OUT"/weight.bin \
    "$OUT"/accumulator.bin "$OUT"/out_init.bin "$OUT"/metadata.csv \
    "$OUT"/memory_addresses.csv "$OUT"/layers_name.csv "$SVTA/compiler_output/"
 : > "$SVTA/compiler_output/add_accumulator.bin"
+# 删除旧 report，避免把陈旧结果误当作本次产物
+rm -f "$SVTA/log_output/fsim_report.txt"
 cd "$SVTA/examples"
 make fsim_compile_single_layer
 make fsim_single_layer
 echo "===== FSIM REPORT (tail) ====="
 tail -40 "$SVTA/log_output/fsim_report.txt"
+
+# 4. 自动验收门：与第一阶段 golden 结果矩阵逐元素对照（exit code 反映 ACCEPT/REJECT）
+REPORT="$SVTA/log_output/fsim_report.txt"
+GOLDEN="$MLIRVTA/test/golden/fsim_result_16x16.txt"
+sed -n '/Final result/,/}/p' "$REPORT" > "$OUT/fsim_result.txt"
+if [ ! -s "$OUT/fsim_result.txt" ]; then
+  echo "FSIM result matrix empty — extraction failed (REJECT)" >&2; exit 1
+fi
+if diff -q "$OUT/fsim_result.txt" "$GOLDEN" >/dev/null; then
+  echo "FSIM RESULT MATCHES PHASE 1 (ACCEPT)"
+else
+  echo "FSIM RESULT DIFFERS FROM PHASE 1 (REJECT)" >&2
+  diff "$GOLDEN" "$OUT/fsim_result.txt" >&2 || true
+  exit 1
+fi

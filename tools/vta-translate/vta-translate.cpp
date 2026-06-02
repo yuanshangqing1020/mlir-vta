@@ -3,7 +3,6 @@
 #include "mlir-vta/Target/VTABinaryEmitter.h"
 #include "mlir-vta/Target/VTADataEmitter.h"
 
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
