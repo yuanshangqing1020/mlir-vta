@@ -2,9 +2,11 @@
 #include "mlir-vta/Dialect/VTA/VTAOps.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/OpDefinition.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -17,6 +19,7 @@ namespace {
 static inline void setBits(uint64_t &word, unsigned lo, unsigned width,
                            uint64_t val) {
   uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+  assert((width == 64 || val <= mask) && "VTA field value exceeds bit width");
   word |= (val & mask) << lo;
 }
 
@@ -147,6 +150,12 @@ static LogicalResult writeFile(StringRef path, const std::vector<uint8_t> &buf) 
     return failure();
   }
   os.write(reinterpret_cast<const char *>(buf.data()), buf.size());
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "vta-translate: error writing " << path << ": "
+                 << os.error().message() << "\n";
+    return failure();
+  }
   return success();
 }
 
@@ -159,6 +168,11 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
   for (Operation &op : module.getBody()->getOperations()) {
     if (auto u = dyn_cast<UopTableOp>(op)) {
       ArrayAttr dst = u.dst(), src = u.src(), wgt = u.wgt();
+      if (dst.size() != src.size() || dst.size() != wgt.size()) {
+        u.emitError("vta.uop_table dst/src/wgt arrays must have equal length (")
+            << dst.size() << ", " << src.size() << ", " << wgt.size() << ")";
+        return failure();
+      }
       size_t n = dst.size();
       for (size_t i = 0; i < n; ++i) {
         uint64_t d = dst[i].cast<IntegerAttr>().getValue().getZExtValue();
@@ -239,8 +253,15 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
       MemFields f;
       f.opcode = 3;
       appendInsn(insnBuf, packMem(f));
+    } else if (op.hasTrait<OpTrait::IsTerminator>()) {
+      // Module/region terminator: nothing to emit.
+    } else if (op.getName().getDialectNamespace() == "vta") {
+      // Unhandled (e.g. high-level) vta op: refuse to silently drop it.
+      op.emitOpError("unhandled vta op in binary emitter; lower it before "
+                     "translation");
+      return failure();
     }
-    // ignore module terminator / unknown ops
+    // Non-vta, non-terminator ops are ignored.
   }
 
   std::string insnPath = (outDir + "/instructions.bin").str();

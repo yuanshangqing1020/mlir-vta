@@ -43,6 +43,10 @@ static LogicalResult writeBinary(llvm::StringRef path,
   }
   os.write(reinterpret_cast<const char *>(data.data()),
            data.size() * sizeof(int32_t));
+  if (!os) {
+    llvm::errs() << "vta-translate: error writing " << path << "\n";
+    return failure();
+  }
   return success();
 }
 
@@ -53,6 +57,10 @@ static LogicalResult writeText(llvm::StringRef path, llvm::StringRef text) {
     return failure();
   }
   os.write(text.data(), text.size());
+  if (!os) {
+    llvm::errs() << "vta-translate: error writing " << path << "\n";
+    return failure();
+  }
   return success();
 }
 
