@@ -3,8 +3,8 @@
 基于 MLIR 的 VTA 加速器编译器，目标是逐步替换 `standalone-vta` 的 Python 两阶段编译器。
 本仓库与上游 `standalone-vta/`（VTA ISA、功能/周期仿真器、Python 参考编译器）平级，只负责 **MLIR 侧的编译器**。
 
-> 设计与分阶段路线见 [`docs/plans/2026-06-02-mlir-vta-phase1-gemm.md`](docs/plans/2026-06-02-mlir-vta-phase1-gemm.md)；
-> 第二阶段 linalg 入口规格见 [`docs/superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md`](docs/superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md)。
+> 文档索引见 [`docs/README.md`](docs/README.md)。阶段一规格见 [`docs/specs/phase1-gemm-design.md`](docs/specs/phase1-gemm-design.md)；
+> 阶段二 linalg 入口见 [`docs/specs/phase2-linalg-entry-design.md`](docs/specs/phase2-linalg-entry-design.md)。
 
 ## 当前状态
 
@@ -170,7 +170,7 @@ mlir-vta/
 │   ├── Target/             # gemm16x16.mlir / lower_gemm.mlir / matmul_tensor.mlir
 │   └── golden/             # 字节级黄金参考 fixtures + fsim_result_16x16.txt
 ├── scripts/                # make_golden.sh / run_fsim.sh / run_fsim_linalg.sh
-└── docs/                   # plans/、DESIGN_cn.md、superpowers/specs/
+└── docs/                   # README.md、DESIGN_cn.md、plans/、specs/
 ```
 
 ## 测试约定

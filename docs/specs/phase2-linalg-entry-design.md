@@ -1,8 +1,8 @@
 # MLIR-VTA 第二阶段设计 · `linalg.matmul` 入口（16×16 单块）
 
 > **文档定位：** 本文是第二阶段的**设计规格（spec）**，经头脑风暴确认后写出，作为后续实现计划（writing-plans）的输入。
-> - 第一阶段计划与黄金参考/位域规范见 [`../../plans/2026-06-02-mlir-vta-phase1-gemm.md`](../../plans/2026-06-02-mlir-vta-phase1-gemm.md)；
-> - 架构总览见 [`../../DESIGN_cn.md`](../../DESIGN_cn.md)。
+> - 第一阶段设计规格见 [`phase1-gemm-design.md`](phase1-gemm-design.md)；实施计划与黄金 hex 全文见 [`../plans/phase1-gemm.md`](../plans/phase1-gemm.md)；
+> - 架构总览见 [`../DESIGN_cn.md`](../DESIGN_cn.md)。
 > - 若代码与本文不一致，**以源码为准**，并同步更新本文。
 
 ---

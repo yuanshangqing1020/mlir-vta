@@ -1,5 +1,7 @@
 # MLIR-VTA 编译器重构 · 第一阶段实施计划（16×16 GEMM 最小闭环）
 
+> 设计规格见 [`../specs/phase1-gemm-design.md`](../specs/phase1-gemm-design.md)。
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal（一句话）：** 用 C++ MLIR 搭建一个 `vta` dialect 与二进制发射器，对 16×16 GEMM 这个固定用例，产出与现有 Python 编译器**字节一致**的 `instructions.bin` / `uop.bin` / 数据 bin / CSV，并通过现有 FSIM 仿真。
@@ -840,7 +842,7 @@ git add mlir-vta && git commit -m "feat(mlir-vta): high-level vta.gemm + single-
 
 ## 执行交接
 
-计划已保存至 `docs/plans/2026-06-02-mlir-vta-phase1-gemm.md`。两种执行方式：
+计划已保存至 `docs/plans/phase1-gemm.md`。两种执行方式：
 
 1. **子代理驱动（推荐）**：每个 Task 派发一个全新子代理，任务间我来评审，迭代快。
 2. **本会话内执行**：在当前会话按 Task 顺序执行，带检查点评审。

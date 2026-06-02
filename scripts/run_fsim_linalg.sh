@@ -8,7 +8,7 @@ OPT=$HOME/mlir-vta-build/bin/vta-opt
 TRANSLATE=$HOME/mlir-vta-build/bin/vta-translate
 
 rm -rf "$OUT" && mkdir -p "$OUT"
-# 1. tensor 入口 → 完整管道 → vtaisa 程序 (PIPELINE 与 _spike_bufferize_notes.md 一致)
+# 1. tensor 入口 → 完整管道 → vtaisa 程序 (PIPELINE 与 docs/plans/spike-bufferize-notes.md 一致)
 "$OPT" "$MLIRVTA/test/Target/matmul_tensor.mlir" \
   --linalg-tile="linalg-tile-sizes=16,16,16" \
   --linalg-bufferize --tensor-bufferize --tensor-constant-bufferize \

@@ -40,7 +40,7 @@
 
 | 文件 | 动作 | 职责 |
 |------|------|------|
-| `docs/superpowers/plans/_spike_bufferize_notes.md` | 创建 | 记录 spike 验证出的可用 pass 管道与样例 IR |
+| `docs/plans/spike-bufferize-notes.md` | 创建 | 记录 spike 验证出的可用 pass 管道与样例 IR |
 | `test/Target/_spike_bufferized.mlir` | 创建 | spike 产出的 bufferize 后 IR，作为 convert pass 测试输入 |
 | `include/mlir-vta/Dialect/VTA/VTAOps.td` | 修改 | `vta.gemm` 改带 memref operand + verifier |
 | `lib/Transforms/LowerVTAGemm.cpp` | 修改 | 守卫由读 `m,n,k` 属性改为读 memref 形状 |
@@ -64,7 +64,7 @@
 **Files:**
 - Create: `mlir-vta/test/Target/matmul_tensor.mlir`
 - Create: `mlir-vta/test/Target/_spike_bufferized.mlir`（spike 输出）
-- Create: `mlir-vta/docs/superpowers/plans/_spike_bufferize_notes.md`
+- Create: `mlir-vta/docs/plans/spike-bufferize-notes.md`
 
 - [ ] **Step 1：写入口 IR `matmul_tensor.mlir`**
 
@@ -117,14 +117,14 @@ grep -q "linalg.matmul" mlir-vta/test/Target/_spike_bufferized.mlir && echo "HAS
 ```
 Expected: 二选一能产出含 memref 语义 `linalg.matmul` 的 IR。
 
-- [ ] **Step 5：记录决策到 `_spike_bufferize_notes.md`**
+- [ ] **Step 5：记录决策到 `spike-bufferize-notes.md`**
 
 写入：所选方案（2 或回退 1）、**最终可用的完整 pass 序列字符串**（逐字）、`_spike_bufferized.mlir` 中 `linalg.matmul` 的实际形态（operand 类型、是否被 `scf.for` 包裹）。后续 Task 2/4 直接引用此序列。
 
 - [ ] **Step 6：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
-  'git add test/Target/matmul_tensor.mlir test/Target/_spike_bufferized.mlir docs/superpowers/plans/_spike_bufferize_notes.md' \
+  'git add test/Target/matmul_tensor.mlir test/Target/_spike_bufferized.mlir docs/plans/spike-bufferize-notes.md' \
   'git commit -m "chore(mlir-vta): phase2 pipeline spike (tile+bufferize) notes"' \
   > /tmp/do_commit.sh && bash /tmp/do_commit.sh
 ```
@@ -501,7 +501,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 **Files:**
 - Create: `mlir-vta/scripts/run_fsim_linalg.sh`
 
-> 入口 `test/Target/matmul_tensor.mlir` 已在 Task 0 创建。下面的「PIPELINE」占位用 Task 0 在 `_spike_bufferize_notes.md` 里记录的**最终可用 pass 序列**（方案 2 或回退方案 1）替换。
+> 入口 `test/Target/matmul_tensor.mlir` 已在 Task 0 创建。下面的「PIPELINE」占位用 Task 0 在 `spike-bufferize-notes.md` 里记录的**最终可用 pass 序列**（方案 2 或回退方案 1）替换。
 
 - [ ] **Step 1：手验完整管道能产出可发射的 `vtaisa` 程序**
 
@@ -548,7 +548,7 @@ TRANSLATE=$HOME/mlir-vta-build/bin/vta-translate
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 # 1. tensor 入口 → 完整管道 → vtaisa 程序
-#    PIPELINE 与 _spike_bufferize_notes.md 一致（方案 2 默认形态）
+#    PIPELINE 与 spike-bufferize-notes.md 一致（方案 2 默认形态）
 "$OPT" "$MLIRVTA/test/Target/matmul_tensor.mlir" \
   --linalg-tile="linalg-tile-sizes=16,16,16" \
   --linalg-bufferize --tensor-bufferize --tensor-constant-bufferize \

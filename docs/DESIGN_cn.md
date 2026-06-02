@@ -1,7 +1,7 @@
 # MLIR-VTA 设计文档
 
 > **文档定位：** 本文是 MLIR-VTA 编译器的**架构与设计说明**，讲清「为什么这样分层、每个模块负责什么、接口长什么样、如何向后续阶段扩展」。
-> - 分阶段、可执行的任务清单见 [`plans/2026-06-02-mlir-vta-phase1-gemm.md`](plans/2026-06-02-mlir-vta-phase1-gemm.md)；
+> - 文档索引见 [`README.md`](README.md)；阶段一见 [`specs/phase1-gemm-design.md`](specs/phase1-gemm-design.md) 与 [`plans/phase1-gemm.md`](plans/phase1-gemm.md)；阶段二见 [`specs/phase2-linalg-entry-design.md`](specs/phase2-linalg-entry-design.md) 与 [`plans/phase2-linalg-entry.md`](plans/phase2-linalg-entry.md)；
 > - 构建与运行命令见 [`../README.md`](../README.md)；
 > - VTA ISA 位域权威定义见上游 [`standalone-vta/docs/VTA_ISA_REFERENCE_cn.md`](../../standalone-vta/docs/VTA_ISA_REFERENCE_cn.md)。
 >
@@ -320,7 +320,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 
 ### 10.1 阶段二：`linalg.matmul → vta.gemm` + tiling + bufferization
 
-详细设计见 [`superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md`](superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md)；Task 0 spike 决策见 [`superpowers/plans/_spike_bufferize_notes.md`](superpowers/plans/_spike_bufferize_notes.md)。
+详细设计见 [`specs/phase2-linalg-entry-design.md`](specs/phase2-linalg-entry-design.md)；Task 0 spike 决策见 [`plans/spike-bufferize-notes.md`](plans/spike-bufferize-notes.md)。
 
 #### 已落地（linalg 入口·16×16 单块）
 
@@ -415,5 +415,9 @@ vta-opt matmul_tensor.mlir \
 | `tools/vta-opt/` `tools/vta-translate/` | 命令行工具 |
 | `test/` | round-trip、字节级用例、黄金 fixtures |
 | `scripts/make_golden.sh` `scripts/run_fsim.sh` `scripts/run_fsim_linalg.sh` | 黄金参考生成、FSIM 端到端、linalg 入口端到端验收 |
-| `docs/superpowers/specs/2026-06-02-mlir-vta-phase2-linalg-entry-design.md` | 阶段二（linalg 入口）详细设计 |
-| `docs/plans/2026-06-02-mlir-vta-phase1-gemm.md` | 阶段一实施计划（含黄金参考与位域规范） |
+| `docs/specs/phase1-gemm-design.md` | 阶段一（GEMM 最小闭环）设计规格 |
+| `docs/specs/phase2-linalg-entry-design.md` | 阶段二（linalg 入口）设计规格 |
+| `docs/plans/phase1-gemm.md` | 阶段一实施计划（含黄金 hex/CSV 全文） |
+| `docs/plans/phase2-linalg-entry.md` | 阶段二实施计划 |
+| `docs/plans/spike-bufferize-notes.md` | 阶段二 Task 0 bufferize 管道 spike |
+| `docs/README.md` | 文档索引 |
