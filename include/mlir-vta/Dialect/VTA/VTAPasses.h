@@ -7,6 +7,8 @@ namespace vta {
 
 std::unique_ptr<mlir::Pass> createLowerVTAGemmPass();
 
+std::unique_ptr<mlir::Pass> createConvertLinalgToVTAPass();
+
 void registerVTAPasses();
 
 } // namespace vta
