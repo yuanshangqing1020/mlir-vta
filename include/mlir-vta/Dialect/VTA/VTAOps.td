@@ -93,6 +93,16 @@ def VTA_FinishOp : VTA_Op<"finish"> {
   let assemblyFormat = "attr-dict";
 }
 
+def VTA_GemmOp : VTA_Op<"gemm"> {
+  let summary = "High-level VTA GEMM op (single tile)";
+  let arguments = (ins
+    I64Attr:$m,
+    I64Attr:$n,
+    I64Attr:$k
+  );
+  let assemblyFormat = "attr-dict";
+}
+
 def VTA_UopTableOp : VTA_Op<"uop_table"> {
   let summary = "VTA micro-op table";
   let arguments = (ins
