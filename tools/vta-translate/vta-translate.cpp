@@ -5,7 +5,9 @@
 
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/InitAllDialects.h"
 #include "mlir/Parser.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -35,12 +37,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  mlir::MLIRContext context;
-  // Standard dialect provides `std.return`, needed to parse func-wrapped IR
-  // (FuncOp itself is builtin). The VTA dialects supply the ops we emit.
-  context.getOrLoadDialect<mlir::StandardOpsDialect>();
-  context.getOrLoadDialect<mlir::vta::VTADialect>();
-  context.getOrLoadDialect<mlir::vtaisa::VTAISADialect>();
+  // Register all upstream dialects so the parser can handle whatever the
+  // lowering pipeline emits (e.g. residual memref.alloc / linalg.fill from
+  // bufferization), in addition to the VTA dialects whose ops we emit. The
+  // emitter ignores non-vta/vtaisa ops, but they must still parse.
+  mlir::DialectRegistry registry;
+  mlir::registerAllDialects(registry);
+  registry.insert<mlir::vta::VTADialect, mlir::vtaisa::VTAISADialect>();
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
 
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(input, &context);
