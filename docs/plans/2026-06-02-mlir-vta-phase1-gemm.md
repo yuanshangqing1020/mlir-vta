@@ -829,7 +829,8 @@ git add mlir-vta && git commit -m "feat(mlir-vta): high-level vta.gemm + single-
 
 | 风险 | 缓解 |
 |------|------|
-| LLVM 13 API 与新版差异（`MlirOptMain` 签名、`parseSourceFile` 模板等） | 以 `/usr/local/llvm/include/mlir` 实际头文件为准；本计划 API 均为 13 可用形态，若签名不符按头文件微调 |
+| LLVM 13 API 与新版差异（`MlirOptMain` 签名、`parseSourceFile` 模板等） | 以 `/usr/local/llvm/include/mlir` 实际头文件为准；本计划 API 均为 13 可用形态，若签名不符按头文件微调。**已知适配**：`.td` 用 `list<OpTrait>`（非 `list<Trait>`）；`MlirOptMain.h` 在 `mlir/Support/`；`DialectRegistry` 在 `mlir/IR/Dialect.h` |
+| **`FileCheck` 未安装**（实测 `/usr/local/llvm/bin` 与 PATH 均无） | round-trip 测试（Task 1/2 的 `.mlir`）**不依赖 `lit`/`FileCheck`**：`.mlir` 顶部 `// RUN: ... FileCheck` 行仅作文档注释；实际校验改用 `vta-opt %s \| vta-opt`（确认可解析/打印）+ `grep -q '<期望片段>'` 断言。字节级 `cmp` 验收（Task 3/4/6）不受影响 |
 | `I1Attr`/`DefaultValuedAttr` 在 13 的写法差异 | 若 `I1Attr` 不可用，改用 `BoolAttr`/`UnitAttr`；round-trip 测试会暴露 |
 | FSIM 单层还需 `add_accumulator.bin`/`expected_out_sram.bin` | Task 5 用空文件或从 Python 产物补齐；FSIM 单层对未用通道通常容忍空文件 |
 | `expected_out_sram` 与 `inp@wgt` 不直接相等（实测） | 阶段一 TSIM 不做数值断言；FSIM 结果对照纯 Python 路径即可 |
