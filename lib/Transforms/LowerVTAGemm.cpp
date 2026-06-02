@@ -29,9 +29,14 @@ struct LowerVTAGemmPass
     module.walk([&](vta::GemmOp g) { targets.push_back(g); });
 
     for (vta::GemmOp g : targets) {
-      // Phase 1 supports only a single 16x16x16 block.
-      if (g.m() != 16 || g.n() != 16 || g.k() != 16) {
-        g.emitError("lower-vta-gemm: only m=n=k=16 supported in phase 1");
+      // Phase 2: still only a single 16x16x16 block; derive dims from operands.
+      auto is16 = [](Value v) {
+        auto mt = v.getType().dyn_cast<MemRefType>();
+        return mt && mt.getRank() == 2 && mt.getShape()[0] == 16 &&
+               mt.getShape()[1] == 16;
+      };
+      if (!is16(g.lhs()) || !is16(g.rhs()) || !is16(g.acc())) {
+        g.emitError("lower-vta-gemm: only 16x16 memref operands supported");
         signalPassFailure();
         return;
       }
