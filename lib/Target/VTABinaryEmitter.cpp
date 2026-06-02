@@ -1,5 +1,5 @@
 #include "mlir-vta/Target/VTABinaryEmitter.h"
-#include "mlir-vta/Dialect/VTA/VTAOps.h"
+#include "mlir-vta/Dialect/VTAISA/VTAISAOps.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/OpDefinition.h"
@@ -12,7 +12,7 @@
 #include <vector>
 
 using namespace mlir;
-using namespace mlir::vta;
+using namespace mlir::vtaisa;
 
 namespace {
 
@@ -255,13 +255,14 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
       appendInsn(insnBuf, packMem(f));
     } else if (op.hasTrait<OpTrait::IsTerminator>()) {
       // Module/region terminator: nothing to emit.
-    } else if (op.getName().getDialectNamespace() == "vta") {
-      // Unhandled (e.g. high-level) vta op: refuse to silently drop it.
-      op.emitOpError("unhandled vta op in binary emitter; lower it before "
-                     "translation");
+    } else if (op.getName().getDialectNamespace() == "vta" ||
+               op.getName().getDialectNamespace() == "vtaisa") {
+      // Unhandled (e.g. high-level vta.gemm) op: refuse to silently drop it.
+      op.emitOpError("unhandled vta/vtaisa op in binary emitter; lower it "
+                     "before translation");
       return failure();
     }
-    // Non-vta, non-terminator ops are ignored.
+    // Other ops are ignored.
   }
 
   std::string insnPath = (outDir + "/instructions.bin").str();

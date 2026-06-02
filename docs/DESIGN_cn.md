@@ -50,7 +50,7 @@ flowchart TD
       TILE["16×16 tiling + bufferization + 依赖信号量推导"]
     end
     subgraph LOW["低层 (阶段一已落地)"]
-      LVTA["vta.load/store/gemm_insn/alu_insn/finish/uop_table"]
+      LVTA["vtaisa.load/store/gemm_insn/alu_insn/finish/uop_table"]
       BIN["vta-translate → insn.bin/uop.bin/数据/CSV"]
     end
     SIM["FSIM / TSIM (上游, 不改)"]
@@ -60,7 +60,7 @@ flowchart TD
 
 | 阶段 | 范围 | 状态 |
 |------|------|------|
-| **一** | `vta` dialect 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
+| **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization（对齐 `dram_allocation`）；通用维度 GEMM | 规划中 |
 | **三** | 依赖信号量自动推导 pass；ALU（ReLU/池化）lowering；大矩阵 `matrix_partitioning` 等价的 tiling 策略 | 规划中 |
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
@@ -70,7 +70,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     HL["vta.gemm {m,n,k}"]
-    LL["低层 vta op 序列<br/>(uop_table + 11 条指令)"]
+    LL["低层 vtaisa op 序列<br/>(uop_table + 11 条指令)"]
     BINS["instructions.bin / uop.bin"]
     DATA["input/weight/accumulator/out_init.bin<br/>+ 3 个 CSV"]
     FSIM["FSIM"]
@@ -84,18 +84,23 @@ flowchart LR
 
 ---
 
-## 3. `vta` Dialect 设计
+## 3. Dialect 设计（`vta` 高层 + `vtaisa` 低层）
 
-dialect 名为 `vta`，C++ 命名空间 `::mlir::vta`，声明于 [`include/mlir-vta/Dialect/VTA/VTADialect.td`](../include/mlir-vta/Dialect/VTA/VTADialect.td)，op 定义于 [`VTAOps.td`](../include/mlir-vta/Dialect/VTA/VTAOps.td)，枚举于 [`VTAEnums.td`](../include/mlir-vta/Dialect/VTA/VTAEnums.td)。
+项目用**两个独立 dialect** 分别承载两个抽象层次：
+
+| dialect | name | C++ 命名空间 | 声明文件 | 角色 |
+|---------|------|--------------|----------|------|
+| **高层** | `vta` | `::mlir::vta` | [`Dialect/VTA/VTADialect.td`](../include/mlir-vta/Dialect/VTA/VTADialect.td)、[`VTAOps.td`](../include/mlir-vta/Dialect/VTA/VTAOps.td) | 张量级算子（`vta.gemm`，未来 `vta.alu` 等）|
+| **低层** | `vtaisa` | `::mlir::vtaisa` | [`Dialect/VTAISA/VTAISADialect.td`](../include/mlir-vta/Dialect/VTAISA/VTAISADialect.td)、[`VTAISAOps.td`](../include/mlir-vta/Dialect/VTAISA/VTAISAOps.td)、[`VTAISAEnums.td`](../include/mlir-vta/Dialect/VTAISA/VTAISAEnums.td) | 与 ISA 一一对应的指令 op |
 
 ### 3.1 两层设计理念
 
 | 层 | op | 角色 | 特点 |
 |----|-----|------|------|
-| **高层** | `vta.gemm`（未来 `vta.alu` 等） | 表达「算什么」的张量级算子 | 便于做 tiling / fusion / 通用化；阶段二/三的 lowering 入口 |
-| **低层** | `vta.load`/`store`/`gemm_insn`/`alu_insn`/`finish`/`uop_table` | 与 128-bit 宏指令 / 32-bit UOP **一一对应** | 纯属性、无 SSA operand，便于无歧义地发射二进制 |
+| **高层 `vta`** | `vta.gemm`（未来 `vta.alu` 等） | 表达「算什么」的张量级算子 | 便于做 tiling / fusion / 通用化；阶段二/三的 lowering 入口 |
+| **低层 `vtaisa`** | `vtaisa.load`/`store`/`gemm_insn`/`alu_insn`/`finish`/`uop_table` | 与 128-bit 宏指令 / 32-bit UOP **一一对应** | 纯属性、无 SSA operand，便于无歧义地发射二进制 |
 
-这种「高层算子 → 低层 ISA op」的两层 dialect 是 MLIR 加速器后端的常见范式：高层留给优化与通用化，低层贴近硬件、保证可发射性。
+把「高层算子」与「低层 ISA op」拆成**两个 dialect**（而非同一 dialect 内的两类 op），是 MLIR 加速器后端的常见范式：`vta` 留给优化与通用化，`vtaisa` 贴近硬件、保证可发射性。`vta.gemm` 经 `-lower-vta-gemm` pass 下降为一串 `vtaisa.*` 指令；发射器只认 `vtaisa` op，遇到未降级的 `vta.gemm` 会显式报错。
 
 ### 3.2 为什么低层 op 用「纯属性、无 operand」
 
@@ -106,22 +111,22 @@ dialect 名为 `vta`，C++ 命名空间 `::mlir::vta`，声明于 [`include/mlir
 
 它们按出现顺序排列在 module body 里，发射器顺序遍历即得指令流（见 §5）。
 
-### 3.3 低层 op 字段一览
+### 3.3 低层 `vtaisa` op 字段一览
 
 布尔依赖位 `pop_prev/pop_next/push_prev/push_next` 默认 `false`；所有整数字段为 `I64Attr`，标注「默认 0」者用 `DefaultValuedAttr<I64Attr,"0">`。
 
 | op | opcode | 关键属性 |
 |----|:------:|----------|
-| `vta.load` | 0 | `buffer_id`(枚举)、4 依赖位、`sram_base`、`dram_base`、`y_size`、`x_size`、`x_stride`、`y_pad_top/bottom`、`x_pad_left/right` |
-| `vta.store` | 1 | `buffer_id`、4 依赖位、`sram_base`、`dram_base`、`y_size`、`x_size`、`x_stride` |
-| `vta.gemm_insn` | 2 | 4 依赖位、`reset`、`uop_bgn/end`、`loop_out/in`、`dst/src/wgt_factor_out/in`（6 个步进因子） |
-| `vta.alu_insn` | 4 | 4 依赖位、`reset`、`uop_bgn/end`、`loop_out/in`、`dst/src_factor_out/in`、`alu_opcode`、`use_imm`、`imm` |
-| `vta.finish` | 3 | 无属性（发射为全零 `VTAMemInsn`，opcode=3） |
-| `vta.uop_table` | — | `dst`、`src`、`wgt` 三个 `I64ArrayAttr`（每条 UOP 一组三元组） |
+| `vtaisa.load` | 0 | `buffer_id`(枚举)、4 依赖位、`sram_base`、`dram_base`、`y_size`、`x_size`、`x_stride`、`y_pad_top/bottom`、`x_pad_left/right` |
+| `vtaisa.store` | 1 | `buffer_id`、4 依赖位、`sram_base`、`dram_base`、`y_size`、`x_size`、`x_stride` |
+| `vtaisa.gemm_insn` | 2 | 4 依赖位、`reset`、`uop_bgn/end`、`loop_out/in`、`dst/src/wgt_factor_out/in`（6 个步进因子） |
+| `vtaisa.alu_insn` | 4 | 4 依赖位、`reset`、`uop_bgn/end`、`loop_out/in`、`dst/src_factor_out/in`、`alu_opcode`、`use_imm`、`imm` |
+| `vtaisa.finish` | 3 | 无属性（发射为全零 `VTAMemInsn`，opcode=3） |
+| `vtaisa.uop_table` | — | `dst`、`src`、`wgt` 三个 `I64ArrayAttr`（每条 UOP 一组三元组） |
 
 ### 3.4 `BufferId` 枚举
 
-[`VTAEnums.td`](../include/mlir-vta/Dialect/VTA/VTAEnums.td) 用 `I64EnumAttr` 定义片上缓冲类型，底层整数值即 ISA 的 `buffer_id`：
+[`VTAISAEnums.td`](../include/mlir-vta/Dialect/VTAISA/VTAISAEnums.td) 用 `I64EnumAttr` 定义片上缓冲类型，底层整数值即 ISA 的 `buffer_id`：
 
 | 枚举 | 值 | 含义 |
 |------|:--:|------|
@@ -131,11 +136,11 @@ dialect 名为 `vta`，C++ 命名空间 `::mlir::vta`，声明于 [`include/mlir
 | `ACC` | 3 | 累加器 buffer |
 | `OUT` | 4 | 输出 buffer（STORE 目标） |
 
-枚举类型化让 lowering 端用强类型 `vta::BufferId::INP` 构造、发射端用 `static_cast<uint64_t>(...)` 取值，既可读又零歧义。
+枚举类型化让 lowering 端用强类型 `vtaisa::BufferId::INP` 构造、发射端用 `static_cast<uint64_t>(...)` 取值，既可读又零歧义。
 
 ### 3.5 `uop_table` 的设计
 
-一次计算需要一张 UOP 表。把它建模为单个 `vta.uop_table` op、用三个等长 I64 数组承载所有 UOP（而非每条 UOP 一个 op），原因：
+一次计算需要一张 UOP 表。把它建模为单个 `vtaisa.uop_table` op、用三个等长 I64 数组承载所有 UOP（而非每条 UOP 一个 op），原因：
 - UOP 表是连续内存块，整体性强，单 op 更贴合语义；
 - 发射器一次性把它写成 `uop.bin`，与宏指令的 `[uop_bgn, uop_end)` 索引解耦；
 - 数组等长是硬性约束，发射器对此做显式校验（不等长则报错，见 §5.4）。
@@ -210,12 +215,12 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 ### 5.4 遍历与 fail-loud
 
 `emitBinary` 顺序遍历 `module.getBody()`：
-- `vta.uop_table` → 校验三数组等长（否则 `emitError` + `failure()`），逐条 `packUop` 追加到 `uopBuf`；
-- `vta.load/store/gemm_insn/alu_insn` → 读对应 op 的属性访问器（LLVM 13 为 snake_case，如 `l.dram_base()`、`l.buffer_id()`），pack 后 16 字节追加到 `insnBuf`；
-- `vta.finish` → 全零 `packMem(opcode=3)`；
+- `vtaisa.uop_table` → 校验三数组等长（否则 `emitError` + `failure()`），逐条 `packUop` 追加到 `uopBuf`；
+- `vtaisa.load/store/gemm_insn/alu_insn` → 读对应 op 的属性访问器（LLVM 13 为 snake_case，如 `l.dram_base()`、`l.buffer_id()`），pack 后 16 字节追加到 `insnBuf`；
+- `vtaisa.finish` → 全零 `packMem(opcode=3)`；
 - **终结符**（`OpTrait::IsTerminator`）→ 跳过；
-- **其它 `vta` 命名空间的 op**（如未 lower 的 `vta.gemm`）→ `emitOpError("unhandled vta op ...")` + `failure()`，**绝不静默丢弃**；
-- 非 vta、非终结符 op → 忽略。
+- **其它 `vta`/`vtaisa` 命名空间的 op**（如未 lower 的 `vta.gemm`）→ `emitOpError("unhandled vta/vtaisa op ...")` + `failure()`，**绝不静默丢弃**；
+- 非 vta/vtaisa、非终结符 op → 忽略。
 
 最后写 `outDir/instructions.bin`、`outDir/uop.bin`，`writeFile` 检查 `raw_fd_ostream` 错误状态。
 
@@ -272,7 +277,7 @@ flowchart LR
 
 | 工具 | 文件 | 作用 |
 |------|------|------|
-| `vta-opt` | [`tools/vta-opt/vta-opt.cpp`](../tools/vta-opt/vta-opt.cpp) | 注册 `vta` dialect 与 pass 的 `mlir-opt` 变体；跑 `-lower-vta-gemm`、round-trip |
+| `vta-opt` | [`tools/vta-opt/vta-opt.cpp`](../tools/vta-opt/vta-opt.cpp) | 注册 `vta` + `vtaisa` 两个 dialect 与 pass 的 `mlir-opt` 变体；跑 `-lower-vta-gemm`、round-trip |
 | `vta-translate` | [`tools/vta-translate/vta-translate.cpp`](../tools/vta-translate/vta-translate.cpp) | 解析 `.mlir` → `emitBinary`（+ `--emit-data` → `emitData`） |
 
 `vta-translate` CLI：`vta-translate <input.mlir> -o <outDir> [--emit-data --input <inp.bin> --weight <wgt.bin>]`。用 LLVM 13 的 `mlir::parseSourceFile<ModuleOp>`（头文件 `mlir/Parser.h`）。
@@ -320,7 +325,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 
 ### 10.3 阶段三：ALU lowering
 
-`vta.alu`（ReLU=MAX imm0、池化=ADD+SHR 等）→ `vta.alu_insn` + `uop_table`。`alu_insn` / `packAlu` 已就绪，只缺 lowering 与测试覆盖。
+高层 `vta.alu`（ReLU=MAX imm0、池化=ADD+SHR 等）→ `vtaisa.alu_insn` + `vtaisa.uop_table`。`vtaisa.alu_insn` / `packAlu` 已就绪，只缺 lowering 与测试覆盖。
 
 ### 10.4 阶段四：`onnx-mlir` 前端
 
@@ -344,14 +349,16 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 
 | 路径 | 内容 |
 |------|------|
-| `include/mlir-vta/Dialect/VTA/VTADialect.td` | dialect 声明 |
-| `include/mlir-vta/Dialect/VTA/VTAOps.td` | 高/低层 op 定义 |
-| `include/mlir-vta/Dialect/VTA/VTAEnums.td` | `BufferId` 枚举 |
+| `include/mlir-vta/Dialect/VTA/VTADialect.td` | 高层 `vta` dialect 声明 |
+| `include/mlir-vta/Dialect/VTA/VTAOps.td` | 高层 op 定义（`vta.gemm`）|
 | `include/mlir-vta/Dialect/VTA/VTAPasses.h` | pass 注册接口 |
-| `lib/Dialect/VTA/` | dialect + op 实现 |
+| `include/mlir-vta/Dialect/VTAISA/VTAISADialect.td` | 低层 `vtaisa` dialect 声明 |
+| `include/mlir-vta/Dialect/VTAISA/VTAISAOps.td` | 低层 ISA op 定义 |
+| `include/mlir-vta/Dialect/VTAISA/VTAISAEnums.td` | `BufferId` 枚举 |
+| `lib/Dialect/VTA/` `lib/Dialect/VTAISA/` | 两个 dialect + op 实现 |
 | `lib/Target/VTABinaryEmitter.cpp` | 指令/UOP 位域打包与发射 |
 | `lib/Target/VTADataEmitter.cpp` | 数据 bin + CSV 发射 |
-| `lib/Transforms/LowerVTAGemm.cpp` | 单块 `vta.gemm` 展开 pass |
+| `lib/Transforms/LowerVTAGemm.cpp` | 单块 `vta.gemm` → `vtaisa.*` 展开 pass |
 | `tools/vta-opt/` `tools/vta-translate/` | 命令行工具 |
 | `test/` | round-trip、字节级用例、黄金 fixtures |
 | `scripts/make_golden.sh` `scripts/run_fsim.sh` | 黄金参考生成、FSIM 端到端 |

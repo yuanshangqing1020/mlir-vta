@@ -1,0 +1,12 @@
+set(LLVM_TARGET_DEFINITIONS VTAISADialect.td)
+mlir_tablegen(VTAISADialect.h.inc -gen-dialect-decls -dialect=vtaisa)
+mlir_tablegen(VTAISADialect.cpp.inc -gen-dialect-defs -dialect=vtaisa)
+add_public_tablegen_target(VTAISADialectIncGen)
+
+set(LLVM_TARGET_DEFINITIONS VTAISAOps.td)
+mlir_tablegen(VTAISAOps.h.inc -gen-op-decls)
+mlir_tablegen(VTAISAOps.cpp.inc -gen-op-defs)
+set(LLVM_TARGET_DEFINITIONS VTAISAEnums.td)
+mlir_tablegen(VTAISAEnums.h.inc -gen-enum-decls)
+mlir_tablegen(VTAISAEnums.cpp.inc -gen-enum-defs)
+add_public_tablegen_target(VTAISAOpsIncGen)

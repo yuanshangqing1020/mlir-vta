@@ -11,11 +11,11 @@
 
 已实现：
 
-- **`vta` dialect**
-  - 低层 ISA op（与 128-bit 宏指令 / 32-bit UOP 一一对应）：`vta.load`、`vta.store`、`vta.gemm_insn`、`vta.alu_insn`、`vta.finish`、`vta.uop_table`
-  - 高层算子：`vta.gemm`（`m`/`n`/`k` 属性）
-- **`-lower-vta-gemm` pass**：把单块 `vta.gemm{m=16,n=16,k=16}` 展开为完整的 11 条 ISA 指令 + UOP 表（非 16×16×16 输入会报错）
-- **`vta-translate`**：把低层 `vta` MLIR 发射为 `instructions.bin` / `uop.bin`，以及（`--emit-data`）数据 bin 与 `metadata/memory_addresses/layers_name` CSV，全部与 Python 编译器字节一致
+- **两个 dialect**
+  - 高层 `vta`：张量级算子 `vta.gemm`（`m`/`n`/`k` 属性）
+  - 低层 `vtaisa`：与 128-bit 宏指令 / 32-bit UOP 一一对应的 ISA op：`vtaisa.load`、`vtaisa.store`、`vtaisa.gemm_insn`、`vtaisa.alu_insn`、`vtaisa.finish`、`vtaisa.uop_table`
+- **`-lower-vta-gemm` pass**：把单块 `vta.gemm{m=16,n=16,k=16}` 展开为完整的 11 条 `vtaisa` ISA 指令 + UOP 表（非 16×16×16 输入会报错）
+- **`vta-translate`**：把低层 `vtaisa` MLIR 发射为 `instructions.bin` / `uop.bin`，以及（`--emit-data`）数据 bin 与 `metadata/memory_addresses/layers_name` CSV，全部与 Python 编译器字节一致
 
 尚未实现（后续阶段）：通用维度 GEMM 的 tiling、依赖信号量自动推导、ALU/卷积的 lowering、ONNX 前端（`onnx-mlir`）、整网。
 
@@ -87,14 +87,16 @@ scripts/run_fsim.sh           # 产出工件 → 喂给 standalone-vta 的 FSIM 
 mlir-vta/
 ├── CMakeLists.txt
 ├── include/mlir-vta/
-│   ├── Dialect/VTA/        # VTADialect.td / VTAOps.td / VTAEnums.td / VTAPasses.h ...
+│   ├── Dialect/VTA/        # 高层: VTADialect.td / VTAOps.td / VTAPasses.h
+│   ├── Dialect/VTAISA/     # 低层: VTAISADialect.td / VTAISAOps.td / VTAISAEnums.td
 │   └── Target/             # VTABinaryEmitter.h / VTADataEmitter.h
 ├── lib/
-│   ├── Dialect/VTA/        # dialect + op 实现
+│   ├── Dialect/VTA/        # 高层 dialect + op 实现
+│   ├── Dialect/VTAISA/     # 低层 dialect + op 实现
 │   ├── Target/             # 二进制 + 数据/CSV 发射器
-│   └── Transforms/         # LowerVTAGemm pass
+│   └── Transforms/         # LowerVTAGemm pass (vta.gemm → vtaisa.*)
 ├── tools/
-│   ├── vta-opt/            # 注册 dialect + pass 的 mlir-opt 变体
+│   ├── vta-opt/            # 注册 vta+vtaisa dialect + pass 的 mlir-opt 变体
 │   └── vta-translate/      # MLIR → 二进制/数据/CSV
 ├── test/
 │   ├── Dialect/            # round-trip

@@ -1,4 +1,5 @@
 #include "mlir-vta/Dialect/VTA/VTADialect.h"
+#include "mlir-vta/Dialect/VTAISA/VTAISADialect.h"
 #include "mlir-vta/Target/VTABinaryEmitter.h"
 #include "mlir-vta/Target/VTADataEmitter.h"
 
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
 
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::vta::VTADialect>();
+  context.getOrLoadDialect<mlir::vtaisa::VTAISADialect>();
 
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(input, &context);
