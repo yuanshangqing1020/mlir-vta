@@ -1,5 +1,6 @@
 add_mlir_library(MLIRVTATransforms
   LowerVTAGemm.cpp
+  LowerVTAAlu.cpp
   ConvertLinalgToVTA.cpp
   VTADramAllocation.cpp
   VTASemaphoreDerive.cpp

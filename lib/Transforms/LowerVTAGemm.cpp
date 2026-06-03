@@ -510,6 +510,9 @@ std::unique_ptr<Pass> mlir::vta::createLowerVTAGemmPass() {
 void mlir::vta::registerVTAPasses() {
   PassRegistration<LowerVTAGemmPass>();
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
+    return mlir::vta::createLowerVTAAluPass();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
     return mlir::vta::createConvertLinalgToVTAPass();
   });
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
