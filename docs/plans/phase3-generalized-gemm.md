@@ -10,7 +10,11 @@
 
 **关键约束（不变）：** lowering 内部复刻上游块调度（CASE 1 单 step），**不**用 MLIR `linalg-tile`；沿用固定缓冲逻辑基址（INP=64/WGT=8/ACC=192/OUT=256/UOP=5120）按块算偏移；依赖位用 CASE 1 单 step 位置模式。
 
-> **实施状态：✅ 32×32×32 已落地并通过全部验证门（2026-06）。** Task 0–5 完成：数据发射器多块化、`vta.gemm` verifier 放宽（16 倍数 + 形状匹配）、通用化 `lower-vta-gemm`（块调度 + uop 表 + 合并 LOAD + 逐块 STORE + 依赖位）、32×32 端到端 + FSIM 验收。验证：`test/golden/matmul_32x32/{input,weight,accumulator}.bin` + `instructions.bin`(14) + `uop.bin`(9) 全部字节级一致；`scripts/run_fsim_linalg_32x32.sh` 打印 `FSIM RESULT MATCHES GOLDEN 32x32 (ACCEPT)`；16×16 旧用例字节级与 FSIM 双回归通过。后续增量（overfit 多 step、依赖信号量通用推导 pass、独立地址分配 pass、ALU lowering）不在本计划范围。
+> **实施状态：✅ 32×32×32 已落地并通过全部验证门（2026-06）。** Task 0–5 完成：数据发射器多块化、`vta.gemm` verifier 放宽（16 倍数 + 形状匹配）、通用化 `lower-vta-gemm`（块调度 + uop 表 + 合并 LOAD + 逐块 STORE + 依赖位）、32×32 端到端 + FSIM 验收。验证：`test/golden/matmul_32x32/{input,weight,accumulator}.bin` + `instructions.bin`(14) + `uop.bin`(9) 全部字节级一致；`scripts/run_fsim_linalg_32x32.sh` 打印 `FSIM RESULT MATCHES GOLDEN 32x32 (ACCEPT)`；16×16 旧用例字节级与 FSIM 双回归通过。
+>
+> **增量 overfit strategy-1 已落地（2026-06）：** `lower-vta-gemm` 扩展到 strategy-1 多步调度（nbA/nbC≥128 时），`test/golden/matmul_overfit_16x2064x16/` 字节级验收（2步 130 UOP 15 指令），`scripts/run_fsim_overfit.sh` 打印 `FSIM RESULT MATCHES OVERFIT GOLDEN (ACCEPT)`；见 [`phase3-overfit-strategy1.md`](phase3-overfit-strategy1.md)。
+>
+> 后续增量（strategy-2/3/4、依赖信号量通用推导 pass、ALU lowering、真·层间串联）不在本计划范围。
 
 ## 环境与 Git（沿用前阶段约定）
 

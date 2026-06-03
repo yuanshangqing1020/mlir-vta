@@ -8,7 +8,8 @@
 | [specs/phase3-generalized-gemm-design.md](specs/phase3-generalized-gemm-design.md) | 阶段三（通用维度 GEMM·多块）设计规格 |
 | [plans/phase1-gemm.md](plans/phase1-gemm.md) | 阶段一实施计划 |
 | [plans/phase2-linalg-entry.md](plans/phase2-linalg-entry.md) | 阶段二实施计划 |
-| [plans/phase3-generalized-gemm.md](plans/phase3-generalized-gemm.md) | 阶段三实施计划 |
+| [plans/phase3-generalized-gemm.md](plans/phase3-generalized-gemm.md) | 阶段三实施计划（CASE1 + 多层） |
+| [plans/phase3-overfit-strategy1.md](plans/phase3-overfit-strategy1.md) | 阶段三增量：Overfit strategy-1 多步调度（16×2064×16） |
 | [plans/spike-bufferize-notes.md](plans/spike-bufferize-notes.md) | 阶段二 Task 0：tile + bufferize 管道 spike 记录 |
 | [plans/spike-generalized-gemm-notes.md](plans/spike-generalized-gemm-notes.md) | 阶段三 Task 0：32×32 黄金解码 spike 记录 |
 

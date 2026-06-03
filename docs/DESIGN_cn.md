@@ -62,7 +62,7 @@ flowchart TD
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
-| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配** + **多层编译**（`-vta-dram-allocation` 跨层 base 递增、逐层独立工件）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）；后续：overfit 多 step、依赖信号量通用推导 pass、ALU lowering、真·层间串联（`fsim_nn`）、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层落地）|
+| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配** + **多层编译**（`-vta-dram-allocation` 跨层 base 递增、逐层独立工件）+ **Overfit Strategy-1 多步调度**（nbA/nbC≥128 时按 delta=min(buf,Kb) 分步 Load/Acc/GEMM/STORE）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、overfit 16×2064×16 字节级+FSIM（2步 130 UOP 15 指令 ACCEPT）；后续：strategy-2/3/4、依赖信号量通用推导 pass、ALU lowering、真·层间串联（`fsim_nn`）、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1 已落地）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流
