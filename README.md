@@ -12,8 +12,9 @@
 |------|------|------|
 | 阶段一 | ✅ 完成 | 手写 `vtaisa.*` / `vta.gemm` → 二进制，与 Python 编译器 **字节级一致**，FSIM 验证 |
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
+| 阶段三 | 🚧 进行中（通用 GEMM·32×32 多块） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位）；32×32 端到端结果矩阵与上游黄金一致，`instructions/uop/数据 bin` 字节级一致 |
 
-尚未实现（后续阶段）：通用维度 GEMM 的 tiling、依赖信号量自动推导、ALU/卷积的 lowering、ONNX 前端（`onnx-mlir`）、整网。
+尚未实现（后续增量）：overfit 多 step（strategy_1..4）、依赖信号量通用推导 pass、独立地址分配 pass、ALU/卷积 lowering、ONNX 前端（`onnx-mlir`）、整网。
 
 ## Dialect 与操作
 
@@ -144,8 +145,9 @@ scripts/make_golden.sh        # 调用 standalone-vta 的 Python 编译器，刷
 ### 6) FSIM 端到端验证
 
 ```bash
-scripts/run_fsim.sh           # 阶段一：gemm16x16.mlir → FSIM
-scripts/run_fsim_linalg.sh    # 阶段二：matmul_tensor.mlir 完整管道 → FSIM + 结果矩阵自校验
+scripts/run_fsim.sh              # 阶段一：gemm16x16.mlir → FSIM
+scripts/run_fsim_linalg.sh       # 阶段二：matmul_tensor.mlir 完整管道 → FSIM + 结果矩阵自校验
+scripts/run_fsim_linalg_32x32.sh # 阶段三：matmul_tensor_32x32.mlir 多块管道 → FSIM + 4 块结果矩阵自校验
 ```
 
 ## 工程结构

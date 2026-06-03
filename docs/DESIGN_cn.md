@@ -61,8 +61,8 @@ flowchart TD
 | 阶段 | 范围 | 状态 |
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
-| **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization（对齐 `dram_allocation`）；通用维度 GEMM | 🚧 进行中（linalg 入口·16×16 单块已落地）|
-| **三** | 依赖信号量自动推导 pass；ALU（ReLU/池化）lowering；大矩阵 `matrix_partitioning` 等价的 tiling 策略 | 规划中 |
+| **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
+| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位；后续：overfit 多 step、依赖信号量通用推导 pass、ALU lowering、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·32×32 多块已落地）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流
@@ -261,8 +261,10 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 文件：[`lib/Transforms/LowerVTAGemm.cpp`](../lib/Transforms/LowerVTAGemm.cpp)，声明 [`VTAPasses.h`](../include/mlir-vta/Dialect/VTA/VTAPasses.h)。
 
 - 形态：`PassWrapper<LowerVTAGemmPass, OperationPass<ModuleOp>>`，命令行参数 `-lower-vta-gemm`（由 `registerVTAPasses()` 注册，`vta-opt` 启动时调用）。
-- 逻辑：`module.walk` 收集所有 `vta::GemmOp`；尺寸约束（16×16×16）已由 `vta.gemm` 的 ODS verifier 在 IR 层保证（`m,n,k` 来自 operand 形状），pass 直接用 `OpBuilder` 在原位按固定顺序创建 `uop_table` + 11 条低层 op + `finish`，最后 `g.erase()`。
-- 生成的 11 条指令字段（含依赖位、`dram_base` 等）直接取自 Python 编译器对 16×16 GEMM 的输出（对应 `memory_addresses.csv` 的地址布局）。
+- 逻辑：`module.walk` 收集所有 `vta::GemmOp`；维度约束（16 倍数 + 形状匹配）已由 ODS verifier 在 IR 层保证。
+- **阶段三通用化（多块·CASE 1 无 overfit）**：pass 从 operand 形状求块维 `Mb=M/16, Kb=K/16, Nb=N/16`，按上游 `get_gemm_operations`（行主序、`A[i,k]·B[k,j]→C[i,j]`、`(a 升序, b 升序)`）产出 GeMM 列表与 UOP 表（每 GeMM 一条 `dst=c·16, src=a·16, wgt=b`，表首加 1 条 reset 占位），再发射：LOAD UOP(reset) + reset GEMM + 合并 LOAD INP/WGT/ACC（`y_size=块数`）+ LOAD UOP(gemm, `x=G`) + 主 GEMM(`uop[0,G)`) + 逐块 STORE(`nbC` 条) + 终止 NOP + FINISH。
+- 依赖位用 **CASE 1 单 step 信号量模式**（位置决定：reset GEMM push_prev、首 LOAD pop_next、末数据 LOAD push_next、ACC LOAD pop_prev、GEMM push_prev+push_next、首 STORE pop_prev、末 STORE push_prev、NOP 排空）。在 `Mb=Kb=Nb=1` 时**字节级退化为第一阶段 11 条 + 2 UOP**（回归 `cmp` 验证）。
+- 缓冲逻辑基址（INP=64/WGT=8/ACC=192/OUT=256/UOP=5120）仍沿用第一阶段固定值（单层 < 1 页，页对齐结果与多块相同），每块偏移按块算（INP/ACC/OUT +16、WGT +1、STORE dram=256+blk·16）。验证：`test/golden/matmul_32x32/{instructions,uop}.bin` 字节级一致。
 
 ### 7.1 当前限制 vs 阶段二通用化
 
@@ -311,6 +313,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 | 端到端 | lower → translate → `cmp` 黄金参考 | `test/Target/lower_gemm.mlir` |
 | 仿真 | 喂 FSIM 跑出结果矩阵 + profiler | `scripts/run_fsim.sh` |
 | linalg 端到端（阶段二）| `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，自校验结果矩阵等于黄金 | `scripts/run_fsim_linalg.sh`、`test/golden/fsim_result_16x16.txt` |
+| 通用 GEMM 端到端（阶段三）| `linalg.matmul`(32×32 tensor) → bufferize → `vta.gemm`(32×32) → 通用 lower → translate（多块数据）→ FSIM，自校验 4 块结果矩阵等于上游黄金；`instructions/uop/数据 bin` 亦字节级一致 | `scripts/run_fsim_linalg_32x32.sh`、`test/golden/matmul_32x32/` |
 
 黄金参考由 [`scripts/make_golden.sh`](../scripts/make_golden.sh) 用**固定随机种子**调用 Python 编译器生成并提交到 `test/golden/`，保证可复现。指令序列与数据值无关（确定性），故可作字节基线。
 
@@ -388,12 +391,12 @@ vta-opt matmul_tensor.mlir \
 
 | 项 | 说明 | 计划 |
 |----|------|------|
-| `LowerVTAGemm` 仅支持 16×16×16 | 单块硬编码 | 通用化阶段（阶段二后续）|
-| `vta.gemm` 的 `m,n,k` 来自 operand 形状，verifier 仅认 16×16 | 阶段二落地为单块 memref 形态 | 通用化阶段放开 |
-| 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 阶段三补 op verifier |
-| `alu_insn` 无 lowering/测试覆盖 | op 与发射器已实现但未被使用 | 阶段三 ALU lowering |
+| `LowerVTAGemm` 仅支持 CASE 1（无 overfit 单 step） | 块数超 SRAM 容量即报错 | 后续增量：overfit 多 step（strategy_1..4）|
+| 依赖位用 CASE 1 固定位置模式 | 单 step 正确（对齐黄金）；非通用 4 计数器推导 | 后续增量：多 step 通用信号量 pass |
+| 地址用固定逻辑基址 | 单层 < 1 页，与上游一致；无独立 allocation pass | 后续增量：复刻 `dram_allocation`（页对齐/多层）|
+| 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 后续补 op verifier |
+| `alu_insn` 无 lowering/测试覆盖 | op 与发射器已实现但未被使用 | 后续 ALU lowering |
 | 无 `lit`/CTest 装配 | 测试靠脚本 `cmp`/`grep` 手跑 | 可选：加最小 lit 配置 |
-| 数据发射器仅单块 16×16 | `emitData` 写死维度与零填充 | 通用化阶段（阶段二后续）|
 
 ---
 

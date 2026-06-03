@@ -98,7 +98,9 @@ vtaisa.* 指令流 ── vta-translate ──► instructions.bin / uop.bin
   - 首 STORE：`pop_prev=1`（消费 `CMP->ST`）；末 STORE：`push_prev=1`（→ `ST->CMP`）。
   - termination：若 `CMP->LD>0` 发 NOP-LOAD（`pop_next=1`，`push_next=(LD->CMP==0)`）；NOP-COMPUTE（`pop_prev=(LD->CMP>0)`，`pop_next=(ST->CMP>0)`）；FINISH。
 
-> **验证锚点：** 实现产出的 14 条指令 dep 位必须与 spike §解码表逐位一致。先以单 step 的具体序列对齐黄金，再抽象为通用计数器逻辑（二者结果须相同）。
+> **验证锚点：** 实现产出的 14 条指令 dep 位必须与 spike §解码表逐位一致。
+>
+> **实现说明（落地）：** 本增量（CASE 1 单 step）的依赖位由**位置唯一确定**（首/末 LOAD、ACC LOAD、GEMM、首/末 STORE、NOP），故实现直接按位置模式发射，等价于 4 计数器在单 step 的结果，且对 16×16（`nbC=1`，单 STORE 同时带 pop_prev+push_prev）与 32×32 两个黄金均字节级一致。**完整的 4 计数器通用推导 pass**（支持 overfit 多 step）留作后续增量。
 
 ## 7. 多块数据 / CSV 发射器（`VTADataEmitter` 通用化）
 
