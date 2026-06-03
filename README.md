@@ -15,7 +15,11 @@
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
 | 阶段三 | ✅ 完成（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端字节级 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1/2/3/4**：`vta.gemm {strategy=N}` 属性，四种溢出调度策略全部字节级验收（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048） |
 
-尚未实现（后续增量）：ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
+尚未实现（后续增量）：真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
+
+**增量 A**（`--vta-semaphore-derive`）：✅ 已实现并验证（对 16×16/32×32/S1-S4 全部字节级一致）  
+**增量 B**（ALU lowering）：✅ 已实现（`vta.alu` op + `--lower-vta-alu` pass，ADD_IMM 16×16 字节级验收 24 insns/17 uops）  
+**增量 C**（真·层间串联）：推迟（依赖 `fsim_nn`）
 
 > **多层 FSIM 限制**：上游 `fsim_single_layer` 逐层 alloc/free 复用低地址，无法执行累积多层地址（上游黄金原件同样崩溃）。故多层正确性以**字节对齐参考编译器**为准；逐层计算正确性由单层 16×16 FSIM 覆盖（L0 指令流与标准 16×16 逐字节相同）。真·层间执行走 `fsim_nn`（推迟）。
 
