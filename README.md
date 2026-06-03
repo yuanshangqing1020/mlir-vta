@@ -15,7 +15,7 @@
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
 | 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端字节级 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1/2/3/4**：`vta.gemm {strategy=N}` 属性，四种溢出调度策略全部字节级验收（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048） |
 
-尚未实现（后续增量）：依赖信号量通用推导 pass、ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
+尚未实现（后续增量）：ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
 
 > **多层 FSIM 限制**：上游 `fsim_single_layer` 逐层 alloc/free 复用低地址，无法执行累积多层地址（上游黄金原件同样崩溃）。故多层正确性以**字节对齐参考编译器**为准；逐层计算正确性由单层 16×16 FSIM 覆盖（L0 指令流与标准 16×16 逐字节相同）。真·层间执行走 `fsim_nn`（推迟）。
 
@@ -70,7 +70,8 @@
 |------|------|------|
 | `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义，任意 16 倍数维度）→ `vta.gemm`；若仍是 tensor 语义则报错 |
 | `VTADramAllocation` | `--vta-dram-allocation` | 多层：按出现顺序遍历各 `vta.gemm`，跨层页对齐 base 递增（复刻上游 `updated_base_address`），把逐层物理/逻辑基址写入模块属性 `vta.layers`，供 lowering/发射器逐层取用 |
-| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`。CASE 1（nbA/nbC<128）：单步合并 LOAD + 逐块 STORE；Strategy-1（nbA/nbC≥128）：按 delta=min(buf,Kb) 多步 Load/GEMM/STORE |
+| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`。CASE 1（无溢出）：单步；Strategy-1/2/3/4（溢出，由 `{strategy=N}` 属性选择）：多步 LOAD/GEMM/STORE |
+| `VTASemaphoreDerive` | `--vta-semaphore-derive` | 在 `vtaisa.*` 序列上运行 4 计数器信号量算法（CMP↔LD↔ST），重新推导所有 `pop_prev/pop_next/push_prev/push_next` 依赖位，取代硬编码；对所有 GEMM 策略产生与黄金字节级一致的结果 |
 
 `vta-opt` 同时注册全部上游 dialect/pass（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等），可直接跑完整中端管道。
 
