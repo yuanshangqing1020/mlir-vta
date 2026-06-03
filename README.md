@@ -13,9 +13,9 @@
 |------|------|------|
 | 阶段一 | ✅ 完成 | 手写 `vtaisa.*` / `vta.gemm` → 二进制，与 Python 编译器 **字节级一致**，FSIM 验证 |
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
-| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端与上游黄金 8 文件字节级一致 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游 |
+| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端与上游黄金 8 文件字节级一致 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1**：nbA/nbC≥128 时多步调度，16×2064×16（2步 130 UOP 15 指令）字节级 + FSIM 验收 |
 
-尚未实现（后续增量）：overfit 多 step（strategy_1..4）、依赖信号量通用推导 pass、ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
+尚未实现（后续增量）：overfit strategy-2/3/4、依赖信号量通用推导 pass、ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
 
 > **多层 FSIM 限制**：上游 `fsim_single_layer` 逐层 alloc/free 复用低地址，无法执行累积多层地址（上游黄金原件同样崩溃）。故多层正确性以**字节对齐参考编译器**为准；逐层计算正确性由单层 16×16 FSIM 覆盖（L0 指令流与标准 16×16 逐字节相同）。真·层间执行走 `fsim_nn`（推迟）。
 
@@ -70,7 +70,7 @@
 |------|------|------|
 | `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义，任意 16 倍数维度）→ `vta.gemm`；若仍是 tensor 语义则报错 |
 | `VTADramAllocation` | `--vta-dram-allocation` | 多层：按出现顺序遍历各 `vta.gemm`，跨层页对齐 base 递增（复刻上游 `updated_base_address`），把逐层物理/逻辑基址写入模块属性 `vta.layers`，供 lowering/发射器逐层取用 |
-| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列（块调度 + UOP 表 + 合并 LOAD + 逐块 STORE + 依赖位）；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`；仅支持 CASE 1（无 overfit 单 step） |
+| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`。CASE 1（nbA/nbC<128）：单步合并 LOAD + 逐块 STORE；Strategy-1（nbA/nbC≥128）：按 delta=min(buf,Kb) 多步 Load/GEMM/STORE |
 
 `vta-opt` 同时注册全部上游 dialect/pass（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等），可直接跑完整中端管道。
 
@@ -225,6 +225,7 @@ scripts/run_fsim.sh              # 阶段一：gemm16x16.mlir → FSIM
 scripts/run_fsim_linalg.sh       # 阶段二：matmul_tensor.mlir 完整管道 → FSIM + 结果矩阵自校验
 scripts/run_fsim_linalg_32x32.sh # 阶段三：matmul_tensor_32x32.mlir 多块管道 → FSIM + 4 块结果矩阵自校验
 scripts/run_fsim_gemm.sh M K N   # 阶段三通用：任意 16 倍数维 → 完整管道 → FSIM + 结果矩阵对齐黄金
+scripts/run_fsim_overfit.sh      # 阶段三 overfit：matmul_tensor_overfit.mlir (16×2064×16, strategy-1) → FSIM
 ```
 
 ## 工程结构
