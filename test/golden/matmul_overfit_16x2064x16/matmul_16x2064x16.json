@@ -1,0 +1,12 @@
+{
+  "NAME": "",
+  "MATRICES": {
+    "A": [16, 2064, "../compiler_output/input_16x2064.bin"],
+    "B": [2064, 16, "../compiler_output/weight_2064x16.bin"],
+    "C": [16, 16, "output"]
+  },
+  "LOAD": { "INP": ["A"], "WGT": ["B"] },
+  "GEMM": ["C", "A", "B"],
+  "STORE": { "C": ["C"] },
+  "STRATEGY": 1
+}
