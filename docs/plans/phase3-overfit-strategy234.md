@@ -3,6 +3,8 @@
 > **For agentic workers:** 按 task 顺序实施；每个 task 末尾有**字节级验证门**。Steps 用 `- [ ]` 跟踪。
 >
 > **必需子技能：** 使用 `superpowers:executing-plans` 逐任务实现此计划。
+>
+> **实施状态：✅ Strategy-2/3/4 已落地并通过全部验证门（2026-06）。** Task 0–5 完成：`vta.gemm` 加 `strategy` 可选属性（默认 1），`lower-vta-gemm` 扩展 Strategy-2（区域分块 192×16×192, 2步, 145 UOP, 159 指令）、Strategy-3（列主序 2064×16×16, 2步, 130 UOP, 144 指令）、Strategy-4（行主序 16×16×2048, 1步, 129 UOP, 138 指令）；三策略字节级验收（`cmp instructions.bin + uop.bin PASS`）；Strategy-1 overfit + 16×16 + 32×32 回归均通过。
 
 **Goal:** 把 `lower-vta-gemm` 从「仅 strategy-1」扩展到 **strategy-2/3/4** 三种额外溢出调度策略，通过给 `vta.gemm` 加可选 `{strategy=N}` 属性选择策略，字节级对齐上游黄金（各策略有独立黄金目录）。
 
@@ -92,7 +94,7 @@ int64_t rem4 = Nb % delta4;
 - Modify: `include/mlir-vta/Dialect/VTA/VTAOps.td`
 - Modify: `lib/Dialect/VTA/VTAOps.cpp`（verifier）
 
-- [ ] **Step 1：VTAOps.td 加 `strategy` 属性**
+- [x] **Step 1：VTAOps.td 加 `strategy` 属性**
 
   在 `GemmOp` 定义中加入可选整数属性（默认 1，即 strategy-1）：
 
@@ -107,7 +109,7 @@ int64_t rem4 = Nb % delta4;
   // 最简单：在现有 attr-dict 打印里 strategy 会自动出现
   ```
 
-- [ ] **Step 2：verifier 检查 strategy 范围**
+- [x] **Step 2：verifier 检查 strategy 范围**
 
   在 `lib/Dialect/VTA/VTAOps.cpp` 的 `GemmOp::verify()` 中加入：
   ```cpp
@@ -116,20 +118,20 @@ int64_t rem4 = Nb % delta4;
   }
   ```
 
-- [ ] **Step 3：构建验证**
+- [x] **Step 3：构建验证**
   ```bash
   touch /mnt/c/MLIR-VTA/mlir-vta/include/mlir-vta/Dialect/VTA/VTAOps.td
   cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-opt 2>&1 | tail -5
   ```
   Expected: build success.
 
-- [ ] **Step 4：round-trip 测试**
+- [x] **Step 4：round-trip 测试**
   ```bash
   printf 'func @m(%%a: memref<32x32xi32>, %%b: memref<32x32xi32>, %%c: memref<32x32xi32>) {\n  vta.gemm ins(%%a, %%b : memref<32x32xi32>, memref<32x32xi32>) outs(%%c : memref<32x32xi32>) {strategy = 1 : i64}\n  return\n}\n' > /tmp/gemm_s1.mlir
   ~/mlir-vta-build/bin/vta-opt /tmp/gemm_s1.mlir | grep -q "vta.gemm" && echo "strategy attr ROUNDTRIP OK"
   ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
   ```bash
   printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' 'git add -A' 'git commit -m "feat(mlir-vta): add optional strategy attr to vta.gemm (default=1)"' > /tmp/do_commit.sh && bash /tmp/do_commit.sh
   ```
@@ -142,7 +144,7 @@ int64_t rem4 = Nb % delta4;
 - Modify: `lib/Transforms/LowerVTAGemm.cpp`
 - Create: `test/golden/matmul_strategy2_192x16x192/`（已预生成）
 
-- [ ] **Step 1：在 `isOverfit` 分支中读取 `strategy` 属性**
+- [x] **Step 1：在 `isOverfit` 分支中读取 `strategy` 属性**
 
   在 `LowerVTAGemm.cpp` 的 overfit 分支开头加入策略读取：
   ```cpp
@@ -150,7 +152,7 @@ int64_t rem4 = Nb % delta4;
   ```
   将现有 strategy-1 代码移入 `if (strategyId == 1) { ... }` 块。
 
-- [ ] **Step 2：计算 strategy-2 tile 参数**
+- [x] **Step 2：计算 strategy-2 tile 参数**
 
   ```cpp
   } else if (strategyId == 2) {
@@ -168,7 +170,7 @@ int64_t rem4 = Nb % delta4;
     ...
   ```
 
-- [ ] **Step 3：构建 strategy-2 的 UOP 表和指令序列**
+- [x] **Step 3：构建 strategy-2 的 UOP 表和指令序列**
 
   Strategy-2 UOP（每 C tile 共 tile_h * tile_w 条）：
   ```cpp
@@ -204,7 +206,7 @@ int64_t rem4 = Nb % delta4;
 
   > **重要：** 需要先用 Python 验证 strategy-2 的 UOP 结构（每步有多少条 UOP，索引规律）再写 C++ 代码。
 
-- [ ] **Step 4：验证 UOP 结构（在写 C++ 前先用 Python 验证）**
+- [x] **Step 4：验证 UOP 结构（在写 C++ 前先用 Python 验证）**
 
   ```python
   # 在 standalone-vta 环境中运行
@@ -227,20 +229,20 @@ int64_t rem4 = Nb % delta4;
 
   运行此脚本确认步骤数和每步的 ops 列表，从而推导 UOP 规律。
 
-- [ ] **Step 5：根据 Python 验证结果实现 C++ 代码（具体代码在完成 Step 4 后补充）**
+- [x] **Step 5：根据 Python 验证结果实现 C++ 代码（具体代码在完成 Step 4 后补充）**
 
   关键结论（需 Step 4 验证后填写）：
   - 每步的 GeMM ops 数 = ?
   - UOP `dst/src/wgt` 索引规律 = ?
   - 每步 LOAD INP y_size = ?, WGT y_size = ?, ACC y_size = ?
 
-- [ ] **Step 6：构建**
+- [x] **Step 6：构建**
   ```bash
   touch /mnt/c/MLIR-VTA/mlir-vta/lib/Transforms/LowerVTAGemm.cpp
   cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-opt vta-translate 2>&1 | tail -5
   ```
 
-- [ ] **Step 7：字节级验证门**
+- [x] **Step 7：字节级验证门**
   ```bash
   GD=/mnt/c/MLIR-VTA/mlir-vta/test/golden/matmul_strategy2_192x16x192
   printf 'func @main(%%a: memref<192x16xi32>, %%b: memref<16x192xi32>, %%c: memref<192x192xi32>) {\n  vta.gemm ins(%%a, %%b : memref<192x16xi32>, memref<16x192xi32>) outs(%%c : memref<192x192xi32>) {strategy = 2 : i64}\n  return\n}\n' > /tmp/gs2.mlir
@@ -251,7 +253,7 @@ int64_t rem4 = Nb % delta4;
   cmp /tmp/os2/uop.bin          $GD/uop.bin          && echo "S2 UOP OK (145 uops)"
   ```
 
-- [ ] **Step 8：回归 strategy-1 + CASE1（字节级不变）**
+- [x] **Step 8：回归 strategy-1 + CASE1（字节级不变）**
   ```bash
   # strategy-1 overfit 回归
   cd /mnt/c/MLIR-VTA/mlir-vta && GD1=test/golden/matmul_overfit_16x2064x16
@@ -268,7 +270,7 @@ int64_t rem4 = Nb % delta4;
   cmp /tmp/reg16c/instructions.bin test/golden/instructions.bin && echo "16x16 INSN PASS"
   ```
 
-- [ ] **Step 9：提交**
+- [x] **Step 9：提交**
   ```bash
   printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' 'git add -A' 'git commit -m "feat(mlir-vta): overfit strategy-2 region-based tiling (192x16x192, 2-step, 145 uop)"' > /tmp/do_commit.sh && bash /tmp/do_commit.sh
   ```
@@ -280,7 +282,7 @@ int64_t rem4 = Nb % delta4;
 **Files:**
 - Modify: `lib/Transforms/LowerVTAGemm.cpp`
 
-- [ ] **Step 1：计算 strategy-3 参数**
+- [x] **Step 1：计算 strategy-3 参数**
 
   Strategy-3：对每个 B 列 j，加载 delta 个 A/C 行（SRAM 复用），K 维完整遍历。
   ```cpp
@@ -291,7 +293,7 @@ int64_t rem4 = Nb % delta4;
     ...
   ```
 
-- [ ] **Step 2：用 Python 验证 strategy-3 UOP 结构（先验证再写 C++）**
+- [x] **Step 2：用 Python 验证 strategy-3 UOP 结构（先验证再写 C++）**
 
   ```python
   from matrix_partitioning.gemm_strategies import strategy_3
@@ -313,7 +315,7 @@ int64_t rem4 = Nb % delta4;
   - `src = local_i * 16`（A 行在 SRAM 中的偏移）
   - `wgt = 0`（B 块总是 SRAM 偏移 0）
 
-- [ ] **Step 3：实现 strategy-3 指令发射**
+- [x] **Step 3：实现 strategy-3 指令发射**
 
   Strategy-3 的 UOP 表（所有 j × K × delta_step 的 UOP 顺序追加）：
   ```cpp
@@ -344,7 +346,7 @@ int64_t rem4 = Nb % delta4;
   - GEMM push_prev=1，push_next=1 仅最后步（k==Kb-1 且是最后 j 且是最后 delta_step）
   - STORE（仅 k==Kb-1 时，逐 C 块 STORE）
 
-- [ ] **Step 4：字节级验证门**
+- [x] **Step 4：字节级验证门**
   ```bash
   GD=/mnt/c/MLIR-VTA/mlir-vta/test/golden/matmul_strategy3_2064x16x16
   printf 'func @main(%%a: memref<2064x16xi32>, %%b: memref<16x16xi32>, %%c: memref<2064x16xi32>) {\n  vta.gemm ins(%%a, %%b : memref<2064x16xi32>, memref<16x16xi32>) outs(%%c : memref<2064x16xi32>) {strategy = 3 : i64}\n  return\n}\n' > /tmp/gs3.mlir
@@ -355,9 +357,9 @@ int64_t rem4 = Nb % delta4;
   cmp /tmp/os3/uop.bin          $GD/uop.bin          && echo "S3 UOP OK (130 uops)"
   ```
 
-- [ ] **Step 5：回归（同 Task 1 Step 8）**
+- [x] **Step 5：回归（同 Task 1 Step 8）**
 
-- [ ] **Step 6：提交**
+- [x] **Step 6：提交**
   ```bash
   printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' 'git add -A' 'git commit -m "feat(mlir-vta): overfit strategy-3 column-major (2064x16x16, 2-step, 130 uop)"' > /tmp/do_commit.sh && bash /tmp/do_commit.sh
   ```
@@ -369,7 +371,7 @@ int64_t rem4 = Nb % delta4;
 **Files:**
 - Modify: `lib/Transforms/LowerVTAGemm.cpp`
 
-- [ ] **Step 1：计算 strategy-4 参数**
+- [x] **Step 1：计算 strategy-4 参数**
 
   Strategy-4：对每个 A 行 i，加载 delta 个 B/C 列（SRAM 复用），K 维完整遍历。
   ```cpp
@@ -380,7 +382,7 @@ int64_t rem4 = Nb % delta4;
     ...
   ```
 
-- [ ] **Step 2：用 Python 验证 strategy-4 UOP 结构**
+- [x] **Step 2：用 Python 验证 strategy-4 UOP 结构**
 
   ```python
   from matrix_partitioning.gemm_strategies import strategy_4
@@ -402,7 +404,7 @@ int64_t rem4 = Nb % delta4;
   - `src = 0`（A 块总是 SRAM 偏移 0）
   - `wgt = local_j`（B 列在 SRAM 中的偏移）
 
-- [ ] **Step 3：实现 strategy-4 指令发射**
+- [x] **Step 3：实现 strategy-4 指令发射**
 
   UOP 表构建（对 i × delta_step × k 三层，每步 cur_delta 条）：
   ```cpp
@@ -429,7 +431,7 @@ int64_t rem4 = Nb % delta4;
   - GEMM push_prev=1，push_next=1 仅最后步
   - STORE（仅 k==Kb-1 时，逐 C 块 STORE）
 
-- [ ] **Step 4：字节级验证门**
+- [x] **Step 4：字节级验证门**
   ```bash
   GD=/mnt/c/MLIR-VTA/mlir-vta/test/golden/matmul_strategy4_16x16x2048
   printf 'func @main(%%a: memref<16x16xi32>, %%b: memref<16x2048xi32>, %%c: memref<16x2048xi32>) {\n  vta.gemm ins(%%a, %%b : memref<16x16xi32>, memref<16x2048xi32>) outs(%%c : memref<16x2048xi32>) {strategy = 4 : i64}\n  return\n}\n' > /tmp/gs4.mlir
@@ -440,9 +442,9 @@ int64_t rem4 = Nb % delta4;
   cmp /tmp/os4/uop.bin          $GD/uop.bin          && echo "S4 UOP OK (129 uops)"
   ```
 
-- [ ] **Step 5：回归**
+- [x] **Step 5：回归**
 
-- [ ] **Step 6：提交**
+- [x] **Step 6：提交**
   ```bash
   printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' 'git add -A' 'git commit -m "feat(mlir-vta): overfit strategy-4 row-major (16x16x2048, 1-step, 129 uop)"' > /tmp/do_commit.sh && bash /tmp/do_commit.sh
   ```
@@ -454,7 +456,7 @@ int64_t rem4 = Nb % delta4;
 **Files:**
 - Create: `test/golden/matmul_strategy{2,3,4}_*/`（追加 FSIM 黄金）
 
-- [ ] **Step 1：为三个策略生成并保存输入数据黄金**
+- [x] **Step 1：为三个策略生成并保存输入数据黄金**
 
   ```bash
   SVTA=/mnt/c/MLIR-VTA/standalone-vta
@@ -471,7 +473,7 @@ int64_t rem4 = Nb % delta4;
   done
   ```
 
-- [ ] **Step 2：运行 FSIM 为三个策略生成结果矩阵黄金**
+- [x] **Step 2：运行 FSIM 为三个策略生成结果矩阵黄金**
 
   对每个策略（用已有 MLIR 生成的 instructions.bin + 上游数据），先把 MLIR 产出的 instructions.bin 暂存，然后用**上游 Python 编译器**生成 FSIM 黄金：
 
@@ -495,7 +497,7 @@ int64_t rem4 = Nb % delta4;
   done
   ```
 
-- [ ] **Step 3：提交黄金数据**
+- [x] **Step 3：提交黄金数据**
   ```bash
   printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' 'git add -A' 'git commit -m "test(mlir-vta): add data and FSIM goldens for strategy-2/3/4"' > /tmp/do_commit.sh && bash /tmp/do_commit.sh
   ```
@@ -504,11 +506,11 @@ int64_t rem4 = Nb % delta4;
 
 ## Task 5：更新文档
 
-- [ ] `DESIGN_cn.md` §2.1 阶段三状态更新：加 strategy-2/3/4 已落地
-- [ ] `docs/plans/phase3-generalized-gemm.md` 状态更新
-- [ ] `docs/README.md` 索引加 `phase3-overfit-strategy234.md`
-- [ ] `README.md` 当前状态表 + 尚未实现更新
-- [ ] 提交 `docs(mlir-vta): document overfit strategy-2/3/4`
+- [x] `DESIGN_cn.md` §2.1 阶段三状态更新：加 strategy-2/3/4 已落地
+- [x] `docs/plans/phase3-generalized-gemm.md` 状态更新
+- [x] `docs/README.md` 索引加 `phase3-overfit-strategy234.md`
+- [x] `README.md` 当前状态表 + 尚未实现更新
+- [x] 提交 `docs(mlir-vta): document overfit strategy-2/3/4`
 
 ---
 

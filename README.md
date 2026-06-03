@@ -13,7 +13,7 @@
 |------|------|------|
 | 阶段一 | ✅ 完成 | 手写 `vtaisa.*` / `vta.gemm` → 二进制，与 Python 编译器 **字节级一致**，FSIM 验证 |
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
-| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端字节级 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1/2/3/4**：`vta.gemm {strategy=N}` 属性，四种溢出调度策略全部字节级验收（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048） |
+| 阶段三 | ✅ 完成（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端字节级 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1/2/3/4**：`vta.gemm {strategy=N}` 属性，四种溢出调度策略全部字节级验收（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048） |
 
 尚未实现（后续增量）：ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
 
