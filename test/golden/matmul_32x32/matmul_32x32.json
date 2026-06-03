@@ -1,0 +1,16 @@
+{
+  "NAME": "",
+  "MATRICES" : {
+    "A": [32, 32, "../compiler_output/input_32x32.bin"],
+    "B": [32, 32, "../compiler_output/weight_32x32.bin"],
+    "C": [32, 32, "output"]
+  },
+  "LOAD": {
+    "INP": ["A"],
+    "WGT": ["B"]
+  },
+  "GEMM": ["C", "A", "B"],
+  "STORE": {
+    "C": ["C"]
+  }
+}
