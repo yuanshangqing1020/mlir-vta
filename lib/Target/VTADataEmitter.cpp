@@ -73,7 +73,14 @@ static LogicalResult writeText(llvm::StringRef path, const std::string &text) {
 LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
                                   llvm::StringRef weightPath,
                                   llvm::StringRef outDir, unsigned mRows,
-                                  unsigned kDimElems, unsigned nCols) {
+                                  unsigned kDimElems, unsigned nCols,
+                                  llvm::StringRef name) {
+  // `name` is the layer suffix for multi-layer compilation (e.g. "L0"); when
+  // non-empty, data/metadata files get the suffix and the per-layer
+  // memory_addresses/layers_name CSVs are left to the binary emitter (which
+  // owns them in multi-layer mode). out_init.bin is never suffixed (matches
+  // upstream, which overwrites it across layers).
+  const std::string sfx = name.str();
   if (mRows % kDim || kDimElems % kDim || nCols % kDim || mRows == 0 ||
       kDimElems == 0 || nCols == 0) {
     llvm::errs() << "vta-translate: data dims must be positive multiples of 16 "
@@ -97,7 +104,7 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
       for (unsigned r = 0; r < kDim; ++r)
         for (unsigned c = 0; c < kDim; ++c)
           inBlocked.push_back(input[(16 * bi + r) * kDimElems + (16 * bk + c)]);
-  if (failed(writeBinary((outDir + "/input.bin").str(), inBlocked)))
+  if (failed(writeBinary((outDir + "/input" + sfx + ".bin").str(), inBlocked)))
     return failure();
 
   // weight.bin: block-major, each 16x16 block transposed. Written block (bk, bj)
@@ -109,12 +116,13 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
       for (unsigned r = 0; r < kDim; ++r)
         for (unsigned c = 0; c < kDim; ++c)
           wBlocked.push_back(weight[(16 * bk + c) * nCols + (16 * bj + r)]);
-  if (failed(writeBinary((outDir + "/weight.bin").str(), wBlocked)))
+  if (failed(writeBinary((outDir + "/weight" + sfx + ".bin").str(), wBlocked)))
     return failure();
 
-  // accumulator.bin / out_init.bin: (Mb*Nb) blocks of 256 int32 zeros.
+  // accumulator<NAME>.bin / out_init.bin: (Mb*Nb) blocks of 256 int32 zeros.
   std::vector<int32_t> zeros(static_cast<size_t>(Mb) * Nb * kBlockElems, 0);
-  if (failed(writeBinary((outDir + "/accumulator.bin").str(), zeros)) ||
+  if (failed(writeBinary((outDir + "/accumulator" + sfx + ".bin").str(),
+                         zeros)) ||
       failed(writeBinary((outDir + "/out_init.bin").str(), zeros)))
     return failure();
 
@@ -151,18 +159,23 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
   memoryAddresses += "UOP," + hx(L.uopPhys) + "," + hx(L.uopLogical) + "\r\n";
   memoryAddresses += "INSN," + hx(L.insnPhys) + "," + hx(L.insnLogical) + "\r\n";
 
-  std::string layersName =
-      "Line identifier,Nb of VTA IR,Provide execution log\r\n"
-      "nb_vta_ir,1,True\r\n"
-      "Line identifier,VTA IR name,Last physical DRAM address allocated by the "
-      "layer\r\n";
-  layersName += "0,," + hx(L.lastPhys) + "\r\n";
-
-  if (failed(writeText((outDir + "/metadata.csv").str(), metadata)) ||
-      failed(writeText((outDir + "/memory_addresses.csv").str(),
-                       memoryAddresses)) ||
-      failed(writeText((outDir + "/layers_name.csv").str(), layersName)))
+  if (failed(writeText((outDir + "/metadata" + sfx + ".csv").str(), metadata)))
     return failure();
+
+  // Single-layer path owns memory_addresses.csv / layers_name.csv here; in
+  // multi-layer mode (named) the binary emitter writes the per-layer versions.
+  if (sfx.empty()) {
+    std::string layersName =
+        "Line identifier,Nb of VTA IR,Provide execution log\r\n"
+        "nb_vta_ir,1,True\r\n"
+        "Line identifier,VTA IR name,Last physical DRAM address allocated by "
+        "the layer\r\n";
+    layersName += "0,," + hx(L.lastPhys) + "\r\n";
+    if (failed(writeText((outDir + "/memory_addresses.csv").str(),
+                         memoryAddresses)) ||
+        failed(writeText((outDir + "/layers_name.csv").str(), layersName)))
+      return failure();
+  }
 
   return success();
 }

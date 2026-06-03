@@ -18,9 +18,15 @@ namespace vta {
 ///
 /// `inputPath` holds the raw MxK row-major int32 matrix; `weightPath` the raw
 /// KxN row-major int32 matrix. Dimensions default to a single 16x16 block.
+///
+/// `name` is the layer suffix for multi-layer compilation (e.g. "L0"): when
+/// non-empty, the data/metadata files are written as input<NAME>.bin etc. and
+/// the memory_addresses/layers_name CSVs are skipped (the binary emitter writes
+/// the per-layer versions). out_init.bin is never suffixed.
 LogicalResult emitData(llvm::StringRef inputPath, llvm::StringRef weightPath,
                        llvm::StringRef outDir, unsigned mRows = 16,
-                       unsigned kDim = 16, unsigned nCols = 16);
+                       unsigned kDim = 16, unsigned nCols = 16,
+                       llvm::StringRef name = "");
 
 } // namespace vta
 } // namespace mlir

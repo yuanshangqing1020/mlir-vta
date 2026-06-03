@@ -5,7 +5,10 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def VTA_GemmOp : VTA_Op<"gemm"> {
   let summary = "block GEMM: acc += lhs * rhs (in-place on acc memref), dims multiple of 16";
-  let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc);
+  // Optional `name` is the layer NAME (file suffix) for multi-layer compilation;
+  // absent/"" means a single unnamed layer (instructions.bin without suffix).
+  let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc,
+                       OptionalAttr<StrAttr>:$name);
   let results = (outs);
   let assemblyFormat =
     "`ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)` "

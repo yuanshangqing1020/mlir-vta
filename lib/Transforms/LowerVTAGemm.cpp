@@ -7,6 +7,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 using namespace mlir;
@@ -29,7 +30,15 @@ struct LowerVTAGemmPass
     SmallVector<vta::GemmOp> targets;
     module.walk([&](vta::GemmOp g) { targets.push_back(g); });
 
-    for (vta::GemmOp g : targets) {
+    // If vta-dram-allocation ran, per-layer bases are recorded on the module and
+    // climb across layers; otherwise each gemm self-allocates from cursor 0.
+    auto layersAttr = module->getAttrOfType<ArrayAttr>("vta.layers");
+
+    for (auto it : llvm::enumerate(targets)) {
+      vta::GemmOp g = it.value();
+      DictionaryAttr layerDict;
+      if (layersAttr && it.index() < layersAttr.size())
+        layerDict = layersAttr[it.index()].dyn_cast<DictionaryAttr>();
       auto lhsT = g.lhs().getType().dyn_cast<MemRefType>();
       auto rhsT = g.rhs().getType().dyn_cast<MemRefType>();
       auto accT = g.acc().getType().dyn_cast<MemRefType>();
@@ -82,11 +91,25 @@ struct LowerVTAGemmPass
       const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
 
       // Page-aligned DRAM layout (replicates upstream dram_allocation). Bases
-      // shift with matrix size, so they must be computed, not hardcoded.
-      const vta::GemmLayout L = vta::computeGemmLayout(Mb, Kb, Nb);
-      const int64_t kUopBase = L.uopLogical, kInpBase = L.inpLogical,
-                    kWgtBase = L.wgtLogical, kAccBase = L.accLogical,
-                    kOutBase = L.outLogical;
+      // shift with matrix size and, for multi-layer, climb across layers.
+      int64_t kUopBase, kInpBase, kWgtBase, kAccBase, kOutBase;
+      if (layerDict) {
+        auto getI = [&](StringRef key) {
+          return layerDict.getAs<IntegerAttr>(key).getInt();
+        };
+        kUopBase = getI("uop_log");
+        kInpBase = getI("inp_log");
+        kWgtBase = getI("wgt_log");
+        kAccBase = getI("acc_log");
+        kOutBase = getI("out_log");
+      } else {
+        const vta::GemmLayout L = vta::computeGemmLayout(Mb, Kb, Nb);
+        kUopBase = L.uopLogical;
+        kInpBase = L.inpLogical;
+        kWgtBase = L.wgtLogical;
+        kAccBase = L.accLogical;
+        kOutBase = L.outLogical;
+      }
 
       OpBuilder b(g);
       Location loc = g.getLoc();
@@ -175,5 +198,8 @@ void mlir::vta::registerVTAPasses() {
   PassRegistration<LowerVTAGemmPass>();
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
     return mlir::vta::createConvertLinalgToVTAPass();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
+    return mlir::vta::createVTADramAllocationPass();
   });
 }

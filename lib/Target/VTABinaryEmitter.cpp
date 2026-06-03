@@ -3,11 +3,13 @@
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/OpDefinition.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -161,9 +163,55 @@ static LogicalResult writeFile(StringRef path, const std::vector<uint8_t> &buf) 
 
 } // namespace
 
+static LogicalResult writeTextFile(StringRef path, const std::string &s) {
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "vta-translate: cannot open " << path << ": " << ec.message()
+                 << "\n";
+    return failure();
+  }
+  os << s;
+  os.flush();
+  return os.has_error() ? failure() : success();
+}
+
+static std::string hx(int64_t v) {
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)v);
+  return std::string(buf);
+}
+
 LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
+  // Multi-layer compilation records per-layer DRAM layout (set by
+  // -vta-dram-allocation); when present, split the op stream at each FINISH into
+  // per-layer instructions<NAME>.bin / uop<NAME>.bin and emit the per-layer
+  // memory_addresses<NAME>.csv + a multi-row layers_name.csv. Without it, behave
+  // exactly as before: a single instructions.bin / uop.bin and no CSVs (the data
+  // emitter owns CSVs in the single-layer path).
+  auto layersAttr = module->getAttrOfType<ArrayAttr>("vta.layers");
+  SmallVector<std::string> layerNames;
+  if (layersAttr)
+    for (Attribute a : layersAttr)
+      layerNames.push_back(
+          a.cast<DictionaryAttr>().getAs<StringAttr>("name").getValue().str());
+
   std::vector<uint8_t> insnBuf;
   std::vector<uint8_t> uopBuf;
+  size_t layerIdx = 0;
+  LogicalResult flushResult = success();
+  auto flushLayer = [&]() {
+    std::string name =
+        layerIdx < layerNames.size() ? layerNames[layerIdx] : std::string();
+    std::string insnPath = (outDir + "/instructions" + name + ".bin").str();
+    std::string uopPath = (outDir + "/uop" + name + ".bin").str();
+    if (failed(writeFile(insnPath, insnBuf)) ||
+        failed(writeFile(uopPath, uopBuf)))
+      flushResult = failure();
+    insnBuf.clear();
+    uopBuf.clear();
+    ++layerIdx;
+  };
 
   LogicalResult walkResult = success();
   module.walk([&](Operation *opPtr) -> WalkResult {
@@ -256,6 +304,10 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
       MemFields f;
       f.opcode = 3;
       appendInsn(insnBuf, packMem(f));
+      // FINISH ends a layer's instruction stream: flush its files.
+      flushLayer();
+      if (failed(flushResult))
+        return WalkResult::interrupt();
     } else if (op.hasTrait<OpTrait::IsTerminator>()) {
       // Module/region terminator: nothing to emit.
     } else if (op.getName().getDialectNamespace() == "vta" ||
@@ -269,14 +321,48 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
     // Other ops are ignored.
     return WalkResult::advance();
   });
-  if (failed(walkResult))
+  if (failed(walkResult) || failed(flushResult))
     return failure();
 
-  std::string insnPath = (outDir + "/instructions.bin").str();
-  std::string uopPath = (outDir + "/uop.bin").str();
-  if (failed(writeFile(insnPath, insnBuf)))
-    return failure();
-  if (failed(writeFile(uopPath, uopBuf)))
-    return failure();
+  // Trailing ops with no closing FINISH (shouldn't happen for well-formed VTA
+  // streams, but flush so nothing is silently dropped).
+  if (!insnBuf.empty() || !uopBuf.empty()) {
+    flushLayer();
+    if (failed(flushResult))
+      return failure();
+  }
+
+  // Multi-layer CSVs (single-layer path leaves these to the data emitter).
+  if (layersAttr) {
+    std::string layersName =
+        "Line identifier,Nb of VTA IR,Provide execution log\r\n";
+    layersName += "nb_vta_ir," + std::to_string(layersAttr.size()) + ",True\r\n";
+    layersName += "Line identifier,VTA IR name,Last physical DRAM address "
+                  "allocated by the layer\r\n";
+    for (size_t i = 0; i < layersAttr.size(); ++i) {
+      auto d = layersAttr[i].cast<DictionaryAttr>();
+      std::string nm = d.getAs<StringAttr>("name").getValue().str();
+      int64_t lastPhys = d.getAs<IntegerAttr>("last_phys").getInt();
+      layersName += std::to_string(i) + "," + nm + "," + hx(lastPhys) + "\r\n";
+
+      std::string ma =
+          "Buffer type,Physical address (hex),Logical address (hex)\r\n";
+      auto row = [&](const char *tag, const char *physKey, const char *logKey) {
+        ma += std::string(tag) + "," + hx(d.getAs<IntegerAttr>(physKey).getInt()) +
+              "," + hx(d.getAs<IntegerAttr>(logKey).getInt()) + "\r\n";
+      };
+      row("INP", "inp_phys", "inp_log");
+      row("WGT", "wgt_phys", "wgt_log");
+      row("ACC", "acc_phys", "acc_log");
+      row("OUT", "out_phys", "out_log");
+      row("UOP", "uop_phys", "uop_log");
+      row("INSN", "insn_phys", "insn_log");
+      if (failed(writeTextFile(
+              (outDir + "/memory_addresses" + nm + ".csv").str(), ma)))
+        return failure();
+    }
+    if (failed(writeTextFile((outDir + "/layers_name.csv").str(), layersName)))
+      return failure();
+  }
   return success();
 }

@@ -13,9 +13,11 @@
 |------|------|------|
 | 阶段一 | ✅ 完成 | 手写 `vtaisa.*` / `vta.gemm` → 二进制，与 Python 编译器 **字节级一致**，FSIM 验证 |
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
-| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 均端到端结果矩阵与上游黄金一致，`instructions/uop/数据 bin/CSV` **8 文件字节级一致** |
+| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端与上游黄金 8 文件字节级一致 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游 |
 
-尚未实现（后续增量）：overfit 多 step（strategy_1..4）、依赖信号量通用推导 pass、独立地址分配 pass、ALU/卷积 lowering、ONNX 前端（`onnx-mlir`）、整网。
+尚未实现（后续增量）：overfit 多 step（strategy_1..4）、依赖信号量通用推导 pass、ALU/卷积 lowering、真·层间串联（`fsim_nn`/`dependency.csv`）、ONNX 前端（`onnx-mlir`）、整网。
+
+> **多层 FSIM 限制**：上游 `fsim_single_layer` 逐层 alloc/free 复用低地址，无法执行累积多层地址（上游黄金原件同样崩溃）。故多层正确性以**字节对齐参考编译器**为准；逐层计算正确性由单层 16×16 FSIM 覆盖（L0 指令流与标准 16×16 逐字节相同）。真·层间执行走 `fsim_nn`（推迟）。
 
 ## Dialect 与操作
 
@@ -25,7 +27,7 @@
 
 | 操作 | 语法 | 说明 |
 |------|------|------|
-| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 缓冲基址由 `computeGemmLayout` 按 4 KiB 页对齐计算（复刻上游 `dram_allocation`，随矩阵尺寸变化），每块偏移按块算。 |
+| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 缓冲基址由 `computeGemmLayout` 按 4 KiB 页对齐计算（复刻上游 `dram_allocation`，随矩阵尺寸变化），每块偏移按块算。可选 `{name="L0"}` 属性标记多层 NAME（文件后缀）。 |
 
 **operand → 缓冲角色约定**（与数据发射器 / `memory_addresses.csv` 一致）：
 
@@ -67,7 +69,8 @@
 | Pass | 参数 | 作用 |
 |------|------|------|
 | `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义，任意 16 倍数维度）→ `vta.gemm`；若仍是 tensor 语义则报错 |
-| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列（块调度 + UOP 表 + 合并 LOAD + 逐块 STORE + 依赖位）；仅支持 CASE 1（无 overfit 单 step） |
+| `VTADramAllocation` | `--vta-dram-allocation` | 多层：按出现顺序遍历各 `vta.gemm`，跨层页对齐 base 递增（复刻上游 `updated_base_address`），把逐层物理/逻辑基址写入模块属性 `vta.layers`，供 lowering/发射器逐层取用 |
+| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列（块调度 + UOP 表 + 合并 LOAD + 逐块 STORE + 依赖位）；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`；仅支持 CASE 1（无 overfit 单 step） |
 
 `vta-opt` 同时注册全部上游 dialect/pass（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等），可直接跑完整中端管道。
 
@@ -164,6 +167,27 @@ mkdir -p /tmp/out32
 > `test/Target/matmul_tensor_48x48x48.mlir`（3×3 块）。注意 **DRAM 基址随尺寸变化**：
 > `32×48×16` 的 INP 占 1.5 页，把 WGT/ACC/OUT/UOP 逻辑基址顶到 12/256/320/6144（不再是
 > 16×16/32×32 的 8/192/256/5120），`vta-translate` 的 `memory_addresses.csv` 会自动跟随。
+
+### 4b) 多层编译（单 func 内多个 `vta.gemm`）
+
+每个 `vta.gemm` 带 `{name="L0"}` 即一层；`--vta-dram-allocation` 跨层递增 DRAM base，发射器按 `finish` 切分逐层产 `instructions<NAME>.bin`/`uop<NAME>.bin` 等，并写多行 `layers_name.csv`。数据发射用可重复的 `--layer NAME=M,K,N,inputpath,weightpath`。
+
+```bash
+# 入口：单 func 内 vta.gemm{name=L0} + vta.gemm{name=L1}
+~/mlir-vta-build/bin/vta-opt test/Target/matmul_2layer_16x16.mlir \
+  --vta-dram-allocation --lower-vta-gemm -o /tmp/lowered2.mlir
+
+# 逐层发射指令/UOP/数据/CSV
+mkdir -p /tmp/out2
+~/mlir-vta-build/bin/vta-translate /tmp/lowered2.mlir -o /tmp/out2 \
+  --layer L0=16,16,16,test/golden/matmul_2layer_16x16/inputL0.bin,test/golden/matmul_2layer_16x16/weightL0.bin \
+  --layer L1=16,16,16,test/golden/matmul_2layer_16x16/inputL1.bin,test/golden/matmul_2layer_16x16/weightL1.bin
+
+# 一键字节级验收（15 文件对齐上游黄金）
+bash scripts/verify_2layer.sh
+```
+
+> 上游 `fsim_single_layer` 无法执行累积多层地址（见上文限制说明），故多层以**字节级对齐参考编译器**为正确性 gate。
 
 ### 5) 字节级回归（对比黄金参考）
 

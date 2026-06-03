@@ -40,7 +40,9 @@ struct ConvertLinalgToVTAPass
       Value acc = m.outputs()[0];
 
       OpBuilder b(m);
-      b.create<vta::GemmOp>(m.getLoc(), lhs, rhs, acc);
+      // Single unnamed layer (no `name` attribute); multi-layer naming is set
+      // explicitly on hand-written vta.gemm ops.
+      b.create<vta::GemmOp>(m.getLoc(), lhs, rhs, acc, /*name=*/StringAttr());
       m.erase();
     }
   }

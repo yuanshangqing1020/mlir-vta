@@ -11,6 +11,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <string>
+#include <vector>
 
 int main(int argc, char **argv) {
   if (argc < 2) {
@@ -19,11 +20,18 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // One layer's data spec for multi-layer compilation.
+  struct LayerSpec {
+    std::string name, input, weight;
+    unsigned rows = 16, k = 16, cols = 16;
+  };
+
   std::string input = argv[1];
   std::string outDir = ".";
   bool emitData = false;
   std::string dataInput, dataWeight;
   unsigned dataRows = 16, dataCols = 16, dataK = 16;
+  std::vector<LayerSpec> layers;
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -40,6 +48,36 @@ int main(int argc, char **argv) {
       dataCols = std::stoul(argv[++i]);
     } else if (arg == "--k" && i + 1 < argc) {
       dataK = std::stoul(argv[++i]);
+    } else if (arg == "--layer" && i + 1 < argc) {
+      // --layer NAME=M,K,N,inputpath,weightpath
+      std::string spec = argv[++i];
+      auto eq = spec.find('=');
+      if (eq == std::string::npos) {
+        llvm::errs() << "vta-translate: --layer expects NAME=M,K,N,inp,wgt\n";
+        return 1;
+      }
+      LayerSpec ls;
+      ls.name = spec.substr(0, eq);
+      std::string rest = spec.substr(eq + 1);
+      std::vector<std::string> parts;
+      size_t pos = 0;
+      while (true) {
+        auto comma = rest.find(',', pos);
+        parts.push_back(rest.substr(pos, comma - pos));
+        if (comma == std::string::npos)
+          break;
+        pos = comma + 1;
+      }
+      if (parts.size() != 5) {
+        llvm::errs() << "vta-translate: --layer expects NAME=M,K,N,inp,wgt\n";
+        return 1;
+      }
+      ls.rows = std::stoul(parts[0]);
+      ls.k = std::stoul(parts[1]);
+      ls.cols = std::stoul(parts[2]);
+      ls.input = parts[3];
+      ls.weight = parts[4];
+      layers.push_back(ls);
     }
   }
 
@@ -65,7 +103,18 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (emitData) {
+  if (!layers.empty()) {
+    // Multi-layer: emit per-layer data/metadata (suffixed). The binary emitter
+    // already wrote the per-layer instructions/uop + layers_name/memory CSVs.
+    for (const LayerSpec &ls : layers) {
+      if (mlir::failed(mlir::vta::emitData(ls.input, ls.weight, outDir, ls.rows,
+                                           ls.k, ls.cols, ls.name))) {
+        llvm::errs() << "vta-translate: data emission failed for layer "
+                     << ls.name << "\n";
+        return 1;
+      }
+    }
+  } else if (emitData) {
     if (dataInput.empty() || dataWeight.empty()) {
       llvm::errs() << "vta-translate: --emit-data requires --input and "
                       "--weight\n";

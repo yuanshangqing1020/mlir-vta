@@ -62,7 +62,7 @@ flowchart TD
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
-| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM；后续：overfit 多 step、依赖信号量通用推导 pass、独立地址分配 pass、ALU lowering、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·任意 16 倍数维已落地）|
+| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配** + **多层编译**（`-vta-dram-allocation` 跨层 base 递增、逐层独立工件）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）；后续：overfit 多 step、依赖信号量通用推导 pass、ALU lowering、真·层间串联（`fsim_nn`）、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·任意 16 倍数维 + 多层落地）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流
@@ -317,6 +317,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 | 仿真 | 喂 FSIM 跑出结果矩阵 + profiler | `scripts/run_fsim.sh` |
 | linalg 端到端（阶段二）| `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，自校验结果矩阵等于黄金 | `scripts/run_fsim_linalg.sh`、`test/golden/fsim_result_16x16.txt` |
 | 通用 GEMM 端到端（阶段三）| `linalg.matmul`(任意 16 倍数 tensor) → bufferize → `vta.gemm` → 通用 lower → translate（多块数据）→ FSIM，自校验结果矩阵等于上游黄金；`instructions/uop/数据 bin/CSV` 8 文件字节级一致。覆盖方阵 32×32、**矩形 32×48×16**、**3×3 方阵 48×48×48** | `scripts/run_fsim_linalg_32x32.sh`、`scripts/run_fsim_gemm.sh <M> <K> <N>`、`scripts/make_golden_gemm.sh`、`test/golden/matmul_{32x32,32x48x16,48x48x48}/` |
+| 多层编译（阶段三）| 单 func 内多 `vta.gemm`（层）→ `-vta-dram-allocation`（跨层页对齐 base 递增、模块属性 `vta.layers`）→ lower → translate（按 `finish` 切分逐层产 `instructions<NAME>.bin` 等 + 多行 `layers_name.csv`）。两层 16×16 共 **15 文件字节级**对齐上游。**FSIM 限制**：上游 `fsim_single_layer` 逐层 alloc/free 复用低地址，无法执行累积多层地址（上游黄金原件同样崩溃）→ 正确性以**字节对齐参考编译器**为准，真·层间执行走 `fsim_nn`（推迟） | `scripts/verify_2layer.sh`、`test/golden/matmul_2layer_16x16/` |
 
 黄金参考由 [`scripts/make_golden.sh`](../scripts/make_golden.sh) 用**固定随机种子**调用 Python 编译器生成并提交到 `test/golden/`，保证可复现。指令序列与数据值无关（确定性），故可作字节基线。
 

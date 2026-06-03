@@ -21,15 +21,20 @@ struct GemmLayout {
   int64_t lastPhys; ///< last physical DRAM byte allocated (for layers_name.csv)
 };
 
-/// Compute the layout from block dimensions Mb=M/16, Kb=K/16, Nb=N/16.
-inline GemmLayout computeGemmLayout(int64_t Mb, int64_t Kb, int64_t Nb) {
+/// Compute the layout from block dimensions Mb=M/16, Kb=K/16, Nb=N/16, starting
+/// the page-aligned cursor at `baseCursor`. For multi-layer compilation each
+/// layer passes the previous layer's `lastPhys` as `baseCursor`, so physical
+/// addresses (and thus logical = phys/divisor) climb monotonically across
+/// layers, exactly as the upstream dram_allocation threads its base_addr.
+inline GemmLayout computeGemmLayoutAt(int64_t Mb, int64_t Kb, int64_t Nb,
+                                      int64_t baseCursor) {
   constexpr int64_t kPage = 0x1000;   // 4 KiB
   constexpr int64_t kBlockBytes = 1024; // 16x16 int32
   const int64_t nbA = Mb * Kb, nbB = Kb * Nb, nbC = Mb * Nb;
   const int64_t G = Mb * Kb * Nb; // number of gemm micro-ops
 
   auto nextPage = [](int64_t cur) { return (cur / kPage + 1) * kPage; };
-  int64_t cur = 0;
+  int64_t cur = baseCursor;
   auto alloc = [&](int64_t sizeBytes, int64_t divisor, int64_t &phys,
                    int64_t &logical) {
     phys = nextPage(cur);
@@ -48,6 +53,12 @@ inline GemmLayout computeGemmLayout(int64_t Mb, int64_t Kb, int64_t Nb) {
   alloc(L.numInsns * 16, /*divisor=*/16, L.insnPhys, L.insnLogical);
   L.lastPhys = L.insnPhys + L.numInsns * 16 - 1;
   return L;
+}
+
+/// Single-layer convenience: cursor starts at 0 (matches a layer compiled on
+/// its own, and the 16/32/rectangular single-layer goldens).
+inline GemmLayout computeGemmLayout(int64_t Mb, int64_t Kb, int64_t Nb) {
+  return computeGemmLayoutAt(Mb, Kb, Nb, /*baseCursor=*/0);
 }
 
 } // namespace vta

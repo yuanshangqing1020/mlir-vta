@@ -9,6 +9,8 @@ std::unique_ptr<mlir::Pass> createLowerVTAGemmPass();
 
 std::unique_ptr<mlir::Pass> createConvertLinalgToVTAPass();
 
+std::unique_ptr<mlir::Pass> createVTADramAllocationPass();
+
 void registerVTAPasses();
 
 } // namespace vta

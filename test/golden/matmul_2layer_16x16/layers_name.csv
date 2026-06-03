@@ -1,0 +1,5 @@
+Line identifier,Nb of VTA IR,Provide execution log
+nb_vta_ir,2,True
+Line identifier,VTA IR name,Last physical DRAM address allocated by the layer
+0,L0,0x60af
+1,L1,0xc0af
