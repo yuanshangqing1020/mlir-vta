@@ -349,12 +349,6 @@ struct LowerVTAGemmPass
           // For each (i_tile, j_tile, k_tile): load tile_h*tile_k INP blocks,
           // tile_k*tile_w WGT blocks, tile_h*tile_w ACC blocks, emit tile_h*tile_w uops.
           // After all k_tile steps in a (i,j) tile: STORE the tile_h*tile_w C blocks.
-          int64_t totalSteps = 0;
-          // Count total steps to identify the absolute last one.
-          for (int64_t i = 0; i < Mb; i += tile_h)
-            for (int64_t j = 0; j < Nb; j += tile_w)
-              totalSteps += (Kb + tile_k - 1) / tile_k;
-
           int64_t stepIdx = 0;
            int64_t tilesDone = 0;  // number of tiles completed so far (STORE count)
 
@@ -406,10 +400,8 @@ struct LowerVTAGemmPass
         } else if (strategyId == 3) {
           // Strategy-3: column-major (delta3 rows of C per step, iterating B-columns × K).
           // Outer: delta_step → j → k; inner LOAD: delta3 A rows + 1 B col.
-          int64_t totalTiles = (nbDelta3 + (rem3 > 0 ? 1 : 0)) * Nb * Kb;
           int64_t stepIdx = 0;
-
-          int64_t s3tilesDone = 0;
+           int64_t s3tilesDone = 0;
            auto emit3Tiles = [&](int64_t cur_delta, int64_t row_start) {
              for (int64_t j = 0; j < Nb; ++j) {
                bool hasPriorStore = (s3tilesDone > 0);
@@ -522,5 +514,8 @@ void mlir::vta::registerVTAPasses() {
   });
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
     return mlir::vta::createVTADramAllocationPass();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
+    return mlir::vta::createVTASemaphoreDerivePass();
   });
 }

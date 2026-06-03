@@ -11,6 +11,8 @@ std::unique_ptr<mlir::Pass> createConvertLinalgToVTAPass();
 
 std::unique_ptr<mlir::Pass> createVTADramAllocationPass();
 
+std::unique_ptr<mlir::Pass> createVTASemaphoreDerivePass();
+
 void registerVTAPasses();
 
 } // namespace vta
