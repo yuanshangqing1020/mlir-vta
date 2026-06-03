@@ -28,101 +28,137 @@ struct LowerVTAGemmPass
     SmallVector<vta::GemmOp> targets;
     module.walk([&](vta::GemmOp g) { targets.push_back(g); });
 
+    // Fixed buffer logical base addresses (page-aligned by the upstream
+    // dram_allocation; identical across 16x16 / 32x32 since a single layer
+    // fits in one 4 KiB page). Per-block offsets are derived from these.
+    constexpr int64_t kUopBase = 5120; // 0x1400
+    constexpr int64_t kInpBase = 64;   // 0x40
+    constexpr int64_t kWgtBase = 8;    // 0x8
+    constexpr int64_t kAccBase = 192;  // 0xc0
+    constexpr int64_t kOutBase = 256;  // 0x100
+
     for (vta::GemmOp g : targets) {
-      // Phase 2: still only a single 16x16x16 block; derive dims from operands.
-      auto is16 = [](Value v) {
-        auto mt = v.getType().dyn_cast<MemRefType>();
-        return mt && mt.getRank() == 2 && mt.getShape()[0] == 16 &&
-               mt.getShape()[1] == 16;
-      };
-      if (!is16(g.lhs()) || !is16(g.rhs()) || !is16(g.acc())) {
-        g.emitError("lower-vta-gemm: only 16x16 memref operands supported");
+      auto lhsT = g.lhs().getType().dyn_cast<MemRefType>();
+      auto rhsT = g.rhs().getType().dyn_cast<MemRefType>();
+      auto accT = g.acc().getType().dyn_cast<MemRefType>();
+      if (!lhsT || !rhsT || !accT) {
+        g.emitError("lower-vta-gemm: expected memref operands");
+        signalPassFailure();
+        return;
+      }
+      // Block dimensions (each matrix dim is a multiple of 16, enforced by the
+      // op verifier): Mb x Kb (A), Kb x Nb (B), Mb x Nb (C).
+      const int64_t Mb = lhsT.getShape()[0] / 16;
+      const int64_t Kb = lhsT.getShape()[1] / 16;
+      const int64_t Nb = rhsT.getShape()[1] / 16;
+      const int64_t nbA = Mb * Kb, nbB = Kb * Nb, nbC = Mb * Nb;
+
+      // Phase-3 supports the no-overfit (CASE 1) single-step schedule, where
+      // all blocks fit on-chip at once. Reject anything that would require
+      // multi-step tiling (left to a later increment).
+      // Upstream block buffer capacities (default config): INP/ACC/OUT 128,
+      // WGT 1024 blocks.
+      if (nbA >= 128 || nbB >= 1024 || nbC >= 128) {
+        g.emitError("lower-vta-gemm: matrix too large for single-step schedule "
+                    "(overfit not yet supported)");
         signalPassFailure();
         return;
       }
 
+      // Block schedule, replicating upstream get_gemm_operations: row-major
+      // block index idx = row * cols + col. For each loaded A[i,k] block, pair
+      // with every B[k,j] block to accumulate C[i,j]. Emit in (a asc, b asc)
+      // order so the resulting UOP table matches the Python compiler byte for
+      // byte.
+      SmallVector<int64_t> uopDst, uopSrc, uopWgt;
+      // UOP 0 is the reset placeholder (used by the reset GEMM's uop[0,1)).
+      uopDst.push_back(0);
+      uopSrc.push_back(0);
+      uopWgt.push_back(0);
+      for (int64_t a = 0; a < nbA; ++a) {
+        int64_t i = a / Kb, k = a % Kb;
+        for (int64_t bb = 0; bb < nbB; ++bb) {
+          int64_t bk = bb / Nb, j = bb % Nb;
+          if (bk != k)
+            continue;
+          int64_t cIdx = i * Nb + j;
+          uopDst.push_back(cIdx * 16);
+          uopSrc.push_back(a * 16);
+          uopWgt.push_back(bb);
+        }
+      }
+      const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
+
       OpBuilder b(g);
       Location loc = g.getLoc();
 
-      // 1. uop_table dst=[0,0] src=[0,0] wgt=[0,0]
-      b.create<vtaisa::UopTableOp>(loc, b.getI64ArrayAttr({0, 0}),
-                                b.getI64ArrayAttr({0, 0}),
-                                b.getI64ArrayAttr({0, 0}));
+      // uop_table: reset uop + G gemm uops (becomes uop.bin in order).
+      b.create<vtaisa::UopTableOp>(loc, b.getI64ArrayAttr(uopDst),
+                                   b.getI64ArrayAttr(uopSrc),
+                                   b.getI64ArrayAttr(uopWgt));
 
-      // 2. load UOP sram=0 dram=5120 y=1 x=1 stride=1
-      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, /*pop_prev=*/false,
-                               /*pop_next=*/false, /*push_prev=*/false,
-                               /*push_next=*/false, /*sram_base=*/0,
-                               /*dram_base=*/5120, /*y_size=*/1, /*x_size=*/1,
-                               /*x_stride=*/1);
-
-      // 3. gemm_insn push_prev reset uop[0,1) loop_out=1 loop_in=16
-      //    dst_factor_out=16 dst_factor_in=1
+      // reset sequence: LOAD UOP[0] then reset GEMM (primes LD<->CMP pipeline).
+      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, false, false, false,
+                               false, /*sram_base=*/0, /*dram_base=*/kUopBase,
+                               /*y_size=*/1, /*x_size=*/1, /*x_stride=*/1);
       b.create<vtaisa::GemmInsnOp>(loc, /*pop_prev=*/false, /*pop_next=*/false,
                                    /*push_prev=*/true, /*push_next=*/false,
                                    /*reset=*/true, /*uop_bgn=*/0, /*uop_end=*/1,
                                    /*loop_out=*/1, /*loop_in=*/16,
                                    /*dst_factor_out=*/16, /*dst_factor_in=*/1);
 
-      // 4. load INP pop_next sram=0 dram=64 y=1 x=16 stride=16
+      // Merged data loads: y_size = number of blocks (block logical addresses
+      // are equidistant). INP/ACC stride 16 (16 vectors/block), WGT stride 1.
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP, /*pop_prev=*/false,
-                               /*pop_next=*/true, /*push_prev=*/false,
-                               /*push_next=*/false, /*sram_base=*/0,
-                               /*dram_base=*/64, /*y_size=*/1, /*x_size=*/16,
-                               /*x_stride=*/16);
-
-      // 5. load WGT push_next sram=0 dram=8 y=1 x=1 stride=1
-      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT, /*pop_prev=*/false,
-                               /*pop_next=*/false, /*push_prev=*/false,
+                               /*pop_next=*/true, false, false, /*sram_base=*/0,
+                               /*dram_base=*/kInpBase, /*y_size=*/nbA,
+                               /*x_size=*/16, /*x_stride=*/16);
+      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT, false, false, false,
                                /*push_next=*/true, /*sram_base=*/0,
-                               /*dram_base=*/8, /*y_size=*/1, /*x_size=*/1,
-                               /*x_stride=*/1);
-
-      // 6. load ACC pop_prev sram=0 dram=192 y=1 x=16 stride=16
+                               /*dram_base=*/kWgtBase, /*y_size=*/nbB,
+                               /*x_size=*/1, /*x_stride=*/1);
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC, /*pop_prev=*/true,
-                               /*pop_next=*/false, /*push_prev=*/false,
-                               /*push_next=*/false, /*sram_base=*/0,
-                               /*dram_base=*/192, /*y_size=*/1, /*x_size=*/16,
-                               /*x_stride=*/16);
+                               false, false, false, /*sram_base=*/0,
+                               /*dram_base=*/kAccBase, /*y_size=*/nbC,
+                               /*x_size=*/16, /*x_stride=*/16);
 
-      // 7. load UOP sram=0 dram=5121 y=1 x=1 stride=1
-      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, /*pop_prev=*/false,
-                               /*pop_next=*/false, /*push_prev=*/false,
-                               /*push_next=*/false, /*sram_base=*/0,
-                               /*dram_base=*/5121, /*y_size=*/1, /*x_size=*/1,
-                               /*x_stride=*/1);
-
-      // 8. gemm_insn push_prev push_next uop[0,1) loop_out=1 loop_in=16
-      //    dst_factor_in=1 src_factor_in=1
+      // LOAD the G gemm uops (uop.bin index 1..G -> dram = base + 1).
+      b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, false, false, false,
+                               false, /*sram_base=*/0,
+                               /*dram_base=*/kUopBase + 1, /*y_size=*/1,
+                               /*x_size=*/G, /*x_stride=*/G);
+      // Main GEMM over the G uops.
       b.create<vtaisa::GemmInsnOp>(loc, /*pop_prev=*/false, /*pop_next=*/false,
                                    /*push_prev=*/true, /*push_next=*/true,
-                                   /*reset=*/false, /*uop_bgn=*/0, /*uop_end=*/1,
+                                   /*reset=*/false, /*uop_bgn=*/0, /*uop_end=*/G,
                                    /*loop_out=*/1, /*loop_in=*/16,
                                    /*dst_factor_out=*/0, /*dst_factor_in=*/1,
                                    /*src_factor_out=*/0, /*src_factor_in=*/1);
 
-      // 9. store OUT pop_prev push_prev sram=0 dram=256 y=1 x=16 stride=16
-      b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT, /*pop_prev=*/true,
-                                /*pop_next=*/false, /*push_prev=*/true,
-                                /*push_next=*/false, /*sram_base=*/0,
-                                /*dram_base=*/256, /*y_size=*/1, /*x_size=*/16,
-                                /*x_stride=*/16);
+      // One STORE per output block. Dependency bits follow the CASE-1
+      // single-step semaphore pattern: first STORE pops the compute-ready
+      // token, last STORE pushes the store-done token (for nbC==1 the single
+      // STORE carries both, matching the 16x16 golden).
+      for (int64_t blk = 0; blk < nbC; ++blk) {
+        bool popPrev = (blk == 0);
+        bool pushPrev = (blk == nbC - 1);
+        b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT, popPrev, false,
+                                  pushPrev, false, /*sram_base=*/blk * 16,
+                                  /*dram_base=*/kOutBase + blk * 16,
+                                  /*y_size=*/1, /*x_size=*/16, /*x_stride=*/16);
+      }
 
-      // 10. load INP pop_next push_next sram=0 dram=0 y=0 x=0 stride=0
+      // Termination NOPs (drain the LD<->CMP / ST<->CMP tokens) + FINISH.
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP, /*pop_prev=*/false,
                                /*pop_next=*/true, /*push_prev=*/false,
                                /*push_next=*/true, /*sram_base=*/0,
                                /*dram_base=*/0, /*y_size=*/0, /*x_size=*/0,
                                /*x_stride=*/0);
-
-      // 11. load UOP pop_prev pop_next sram=0 dram=0 y=0 x=0 stride=0
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, /*pop_prev=*/true,
                                /*pop_next=*/true, /*push_prev=*/false,
                                /*push_next=*/false, /*sram_base=*/0,
                                /*dram_base=*/0, /*y_size=*/0, /*x_size=*/0,
                                /*x_stride=*/0);
-
-      // 12. finish
       b.create<vtaisa::FinishOp>(loc);
 
       g.erase();
