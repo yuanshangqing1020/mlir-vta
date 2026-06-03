@@ -8,6 +8,8 @@
 
 **Tech Stack:** C++17、MLIR/LLVM 13.0.0（`/usr/local/llvm`）、CMake 3.22 + Unix Makefiles、`clang++`、TableGen、上游 `mlir-opt`（spike 用）、standalone-vta FSIM（黄金参考与验收）。
 
+> **实施状态：✅ 已完成并通过验收（2026-06）。** Task 0–5 全部落地：`vta.gemm` 带 16×16 memref operand + verifier、`--convert-linalg-to-vta` pass、`vta-opt` 注册全部上游 dialect/pass、发射器递归遍历。端到端验收门 `scripts/run_fsim_linalg.sh` 跑通并打印 `FSIM RESULT MATCHES PHASE 1 (ACCEPT)`（结果矩阵与阶段一黄金 `test/golden/fsim_result_16x16.txt` 逐元素一致）；func 包裹发射、dialect round-trip、verifier 拒绝非 16×16 等子断言均通过。后续工作（多块/通用 `m,n,k`、地址分配、依赖信号量推导、ALU lowering）属通用化阶段，不在本计划范围内。
+
 ---
 
 ## 仓库布局与 Git（沿用第一阶段约定）
@@ -66,7 +68,7 @@
 - Create: `mlir-vta/test/Target/_spike_bufferized.mlir`（spike 输出）
 - Create: `mlir-vta/docs/plans/spike-bufferize-notes.md`
 
-- [ ] **Step 1：写入口 IR `matmul_tensor.mlir`**
+- [x] **Step 1：写入口 IR `matmul_tensor.mlir`**
 
 ```mlir
 func @main(%A: tensor<16x16xi32>, %B: tensor<16x16xi32>) -> tensor<16x16xi32> {
@@ -80,7 +82,7 @@ func @main(%A: tensor<16x16xi32>, %B: tensor<16x16xi32>) -> tensor<16x16xi32> {
 }
 ```
 
-- [ ] **Step 2：先确认入口能解析（语法对齐 LLVM 13）**
+- [x] **Step 2：先确认入口能解析（语法对齐 LLVM 13）**
 
 Run:
 ```bash
@@ -88,7 +90,7 @@ Run:
 ```
 Expected: 打印 `PARSE OK`。若 `linalg.fill`/`linalg.init_tensor` 语法报错，按报错调整为 LLVM 13 接受的写法（13 用 `linalg.init_tensor` 与 `linalg.fill(%v, %t)` 形态），重跑至 `PARSE OK`。
 
-- [ ] **Step 3：方案 2 —— tensor 上 tile，再 bufferize**
+- [x] **Step 3：方案 2 —— tensor 上 tile，再 bufferize**
 
 Run（一次性管道；若某 pass 名/选项不被接受按 `--help` 修正）：
 ```bash
@@ -103,7 +105,7 @@ grep -q "memref" mlir-vta/test/Target/_spike_bufferized.mlir && echo "HAS MEMREF
 ```
 Expected: `PIPE OK` + `HAS MATMUL` + `HAS MEMREF`，且 `_spike_bufferized.mlir` 里存在一个操作数为 `memref<16x16xi32>` 的 `linalg.matmul`。
 
-- [ ] **Step 4：若方案 2 失败，回退方案 1（先 bufferize 再在 memref 上 tile）**
+- [x] **Step 4：若方案 2 失败，回退方案 1（先 bufferize 再在 memref 上 tile）**
 
 Run（仅当 Step 3 不满足时）：
 ```bash
@@ -117,11 +119,11 @@ grep -q "linalg.matmul" mlir-vta/test/Target/_spike_bufferized.mlir && echo "HAS
 ```
 Expected: 二选一能产出含 memref 语义 `linalg.matmul` 的 IR。
 
-- [ ] **Step 5：记录决策到 `spike-bufferize-notes.md`**
+- [x] **Step 5：记录决策到 `spike-bufferize-notes.md`**
 
 写入：所选方案（2 或回退 1）、**最终可用的完整 pass 序列字符串**（逐字）、`_spike_bufferized.mlir` 中 `linalg.matmul` 的实际形态（operand 类型、是否被 `scf.for` 包裹）。后续 Task 2/4 直接引用此序列。
 
-- [ ] **Step 6：提交**
+- [x] **Step 6：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add test/Target/matmul_tensor.mlir test/Target/_spike_bufferized.mlir docs/plans/spike-bufferize-notes.md' \
@@ -138,7 +140,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 - Modify: `mlir-vta/lib/Transforms/LowerVTAGemm.cpp`
 - Modify: `mlir-vta/test/Target/lower_gemm.mlir`
 
-- [ ] **Step 1：改 `VTAOps.td` 的 `vta.gemm` 定义**
+- [x] **Step 1：改 `VTAOps.td` 的 `vta.gemm` 定义**
 
 把现有 `VTA_GemmOp`（`ins I64Attr m,n,k`）整体替换为：
 ```tablegen
@@ -163,7 +165,7 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
 ```
 > `AnyMemRef` 由 `mlir/IR/OpBase.td` 提供（经 `VTADialect.td` → `OpBase.td` 传递引入）。LLVM 13 用 `let verifier = [{...}]`（非 `hasVerifier`）。
 
-- [ ] **Step 2：改 `LowerVTAGemm.cpp` 的尺寸守卫（读 memref 形状而非属性）**
+- [x] **Step 2：改 `LowerVTAGemm.cpp` 的尺寸守卫（读 memref 形状而非属性）**
 
 把现有守卫块：
 ```cpp
@@ -190,7 +192,7 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
 ```
 > `MemRefType`/`Value` 已由 `VTAOps.h`（含 `BuiltinTypes.h`）引入；`g.erase()` 仍有效（`vta.gemm` 无 result）。其余 11 条 `vtaisa` op 的硬编码生成**完全不变**。
 
-- [ ] **Step 3：更新 round-trip 测试 `lower_gemm.mlir`（高层入口现在带 operand）**
+- [x] **Step 3：更新 round-trip 测试 `lower_gemm.mlir`（高层入口现在带 operand）**
 
 整文件替换为：
 ```mlir
@@ -200,7 +202,7 @@ func @main(%A: memref<16x16xi32>, %B: memref<16x16xi32>, %C: memref<16x16xi32>) 
 }
 ```
 
-- [ ] **Step 4：构建**
+- [x] **Step 4：构建**
 
 Run:
 ```bash
@@ -208,7 +210,7 @@ cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-opt vta-translate
 ```
 Expected: 构建成功（TableGen 重新生成 `VTAOps.*.inc`）。
 
-- [ ] **Step 5：round-trip + lowering 断言**
+- [x] **Step 5：round-trip + lowering 断言**
 
 Run:
 ```bash
@@ -218,7 +220,7 @@ Run:
 ```
 Expected: `PARSE+ROUNDTRIP OK`、`LOWER OK`、`GEMM ERASED OK`。
 
-- [ ] **Step 6：提交**
+- [x] **Step 6：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add -A' 'git commit -m "feat(mlir-vta): vta.gemm carries 16x16 memref operands"' \
@@ -236,7 +238,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 - Modify: `mlir-vta/tools/vta-opt/vta-opt.cpp`
 - Modify: `mlir-vta/tools/vta-opt/CMakeLists.txt`
 
-- [ ] **Step 1：写 `ConvertLinalgToVTA.cpp`**
+- [x] **Step 1：写 `ConvertLinalgToVTA.cpp`**
 
 ```cpp
 #include "mlir-vta/Dialect/VTA/VTADialect.h"
@@ -295,7 +297,7 @@ std::unique_ptr<Pass> mlir::vta::createConvertLinalgToVTAPass() {
 ```
 > LLVM 13：`linalg::MatmulOp` 在 `mlir/Dialect/Linalg/IR/LinalgOps.h`；`inputs()`/`outputs()` 返回 `ValueRange`；`hasBufferSemantics()` 为 LinalgOp 接口方法。
 
-- [ ] **Step 2：在 `VTAPasses.h` 声明并注册新 pass**
+- [x] **Step 2：在 `VTAPasses.h` 声明并注册新 pass**
 
 把现有内容替换为：
 ```cpp
@@ -325,7 +327,7 @@ void mlir::vta::registerVTAPasses() {
 ```
 > 用 `registerPass(factory)` 形式注册另一个文件里的 pass，避免把 `ConvertLinalgToVTAPass` 类型暴露到本文件。LLVM 13 提供 `registerPass(const PassAllocatorFunction&)`。
 
-- [ ] **Step 3：改 `lib/Transforms/CMakeLists.txt`**
+- [x] **Step 3：改 `lib/Transforms/CMakeLists.txt`**
 
 整文件替换为：
 ```cmake
@@ -336,7 +338,7 @@ add_mlir_library(MLIRVTATransforms
   LINK_LIBS PUBLIC MLIRVTA MLIRVTAISA MLIRIR MLIRPass MLIRLinalg)
 ```
 
-- [ ] **Step 4：改 `tools/vta-opt/vta-opt.cpp`（注册全部上游 dialect/pass）**
+- [x] **Step 4：改 `tools/vta-opt/vta-opt.cpp`（注册全部上游 dialect/pass）**
 
 整文件替换为：
 ```cpp
@@ -360,7 +362,7 @@ int main(int argc, char **argv) {
 }
 ```
 
-- [ ] **Step 5：改 `tools/vta-opt/CMakeLists.txt`（链接全部 dialect/conversion 库）**
+- [x] **Step 5：改 `tools/vta-opt/CMakeLists.txt`（链接全部 dialect/conversion 库）**
 
 整文件替换为：
 ```cmake
@@ -377,7 +379,7 @@ target_link_libraries(vta-opt PRIVATE
 mlir_check_all_link_libraries(vta-opt)
 ```
 
-- [ ] **Step 6：重新配置 + 构建（改了 CMake）**
+- [x] **Step 6：重新配置 + 构建（改了 CMake）**
 
 Run:
 ```bash
@@ -388,7 +390,7 @@ cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-opt
 ```
 Expected: 构建成功，`vta-opt --help` 现在能看到 `-linalg-tile`、`-linalg-bufferize`、`-convert-linalg-to-vta`、`-canonicalize`、`-lower-vta-gemm`。
 
-- [ ] **Step 7：convert pass 单元断言（用 spike 产出的 bufferized IR）**
+- [x] **Step 7：convert pass 单元断言（用 spike 产出的 bufferized IR）**
 
 Run:
 ```bash
@@ -399,7 +401,7 @@ grep -q "linalg.matmul" /tmp/converted.mlir && echo "STILL HAS matmul (BAD)" || 
 ```
 Expected: `HAS vta.gemm` + `matmul ERASED OK`。
 
-- [ ] **Step 8：提交**
+- [x] **Step 8：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add -A' 'git commit -m "feat(mlir-vta): add convert-linalg-to-vta pass; vta-opt registers upstream passes"' \
@@ -414,7 +416,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 - Modify: `mlir-vta/lib/Target/VTABinaryEmitter.cpp`
 - Create: `mlir-vta/test/Target/gemm16x16_func.mlir`
 
-- [ ] **Step 1：把 `emitBinary` 的顶层 for 循环改为递归 `module.walk`**
+- [x] **Step 1：把 `emitBinary` 的顶层 for 循环改为递归 `module.walk`**
 
 在 `VTABinaryEmitter.cpp` 中，把：
 ```cpp
@@ -445,7 +447,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 ```
 > `module.walk` 默认 post-order；因 `vtaisa.*` 与 `uop_table` 均为叶子 op（无嵌套 region），其相对顺序等于块内文本序，发射顺序正确。`func.func`/`func.return`/`module`/`arith.*`/`memref.*` 等非 vta/vtaisa op 落入「忽略」或「终结符跳过」分支。`WalkResult`/`WalkOrder` 由 `mlir/IR/OpDefinition.h`→`Visitors.h` 引入，无需额外 include。
 
-- [ ] **Step 2：写 func 包裹的发射测试 `gemm16x16_func.mlir`**
+- [x] **Step 2：写 func 包裹的发射测试 `gemm16x16_func.mlir`**
 
 把第一阶段 `test/Target/gemm16x16.mlir` 里的 13 条 op（1 条 `vtaisa.uop_table` + 11 条指令 + 1 条 `vtaisa.finish`）原样放进一个 `func`：
 ```mlir
@@ -458,7 +460,7 @@ func @main() {
 ```
 > 具体 11 条指令的属性请逐条复制 `test/Target/gemm16x16.mlir` 的现有内容，仅把它们移入 `func @main() { ... return }`。
 
-- [ ] **Step 3：构建**
+- [x] **Step 3：构建**
 
 Run:
 ```bash
@@ -466,7 +468,7 @@ cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-translate
 ```
 Expected: 构建成功。
 
-- [ ] **Step 4：递归遍历的字节级断言（func 包裹仍应等于 golden）**
+- [x] **Step 4：递归遍历的字节级断言（func 包裹仍应等于 golden）**
 
 Run:
 ```bash
@@ -477,7 +479,7 @@ cmp /tmp/vtaout_func/uop.bin mlir-vta/test/golden/uop.bin && echo "FUNC UOP OK"
 ```
 Expected: `FUNC INSN OK` + `FUNC UOP OK`（证明嵌在 func 内的 vtaisa op 被正确递归发射）。
 
-- [ ] **Step 5：回归 —— 顶层（非 func）旧用例仍然正确**
+- [x] **Step 5：回归 —— 顶层（非 func）旧用例仍然正确**
 
 Run:
 ```bash
@@ -487,7 +489,7 @@ cmp /tmp/vtaout_top/instructions.bin mlir-vta/test/golden/instructions.bin && ec
 ```
 Expected: `TOP INSN OK`（递归遍历对顶层 module body 也兼容）。
 
-- [ ] **Step 6：提交**
+- [x] **Step 6：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add -A' 'git commit -m "feat(mlir-vta): emitter walks recursively to handle ops nested in func/scf"' \
@@ -503,7 +505,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 
 > 入口 `test/Target/matmul_tensor.mlir` 已在 Task 0 创建。下面的「PIPELINE」占位用 Task 0 在 `spike-bufferize-notes.md` 里记录的**最终可用 pass 序列**（方案 2 或回退方案 1）替换。
 
-- [ ] **Step 1：手验完整管道能产出可发射的 `vtaisa` 程序**
+- [x] **Step 1：手验完整管道能产出可发射的 `vtaisa` 程序**
 
 Run（PIPELINE = Task 0 记录的序列；下面给方案 2 的默认形态）：
 ```bash
@@ -519,7 +521,7 @@ grep -q "vta.gemm" /tmp/lowered_tensor.mlir && echo "RESIDUAL vta.gemm (BAD)" ||
 ```
 Expected: `PIPE OK` + `HAS vtaisa` + `no residual matmul` + `no residual vta.gemm`。
 
-- [ ] **Step 2：translate 产出二进制，并对 golden 做非阻断 `cmp`**
+- [x] **Step 2：translate 产出二进制，并对 golden 做非阻断 `cmp`**
 
 Run:
 ```bash
@@ -534,7 +536,7 @@ cmp /tmp/vtaout_lin/uop.bin mlir-vta/test/golden/uop.bin \
 ```
 Expected: 因 lowering/数据未变，理应打印两个 `MATCHES GOLDEN`（若不一致，仅记录，验收以 Step 4 的 FSIM 为准）。
 
-- [ ] **Step 3：写 `scripts/run_fsim_linalg.sh`**
+- [x] **Step 3：写 `scripts/run_fsim_linalg.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -571,7 +573,7 @@ echo "===== FSIM REPORT (tail) ====="
 tail -40 "$SVTA/log_output/fsim_report.txt"
 ```
 
-- [ ] **Step 4：跑 FSIM 并与第一阶段结果矩阵逐元素对照（验收门）**
+- [x] **Step 4：跑 FSIM 并与第一阶段结果矩阵逐元素对照（验收门）**
 
 Run:
 ```bash
@@ -586,7 +588,7 @@ diff /tmp/fsim_phase1_matrix.txt /tmp/fsim_phase2_matrix.txt && echo "FSIM RESUL
 ```
 Expected: `diff` 无输出 + 打印 `FSIM RESULT MATCHES PHASE 1 (ACCEPT)`。这是第二阶段的核心验收点。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add -A' 'git commit -m "test(mlir-vta): linalg-entry end-to-end pipeline + FSIM acceptance"' \
@@ -600,7 +602,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 **Files:**
 - Modify: `mlir-vta/docs/DESIGN_cn.md`
 
-- [ ] **Step 1：更新 §2.1 阶段表与 §10.1**
+- [x] **Step 1：更新 §2.1 阶段表与 §10.1**
 
 把阶段二状态由「规划中」改为「进行中（linalg 入口·16×16 单块已落地）」。在 §10.1 追加一段说明：
 - 已落地：`vta.gemm` 带 memref operand；`--convert-linalg-to-vta`；`vta-opt` 注册全部上游 pass；发射器递归遍历；端到端 `linalg.matmul`(tensor) → tile → bufferize → vta.gemm → lower → translate → FSIM。
@@ -608,11 +610,11 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
 - 记录 Task 0 spike 的最终 pass 序列与方案（2 或回退 1）。
 - 仍未做：多块/通用 `m,n,k`、地址分配 pass、依赖信号量推导、ALU lowering。
 
-- [ ] **Step 2：更新 §11 技术债表**
+- [x] **Step 2：更新 §11 技术债表**
 
 把「`LowerVTAGemm` 仅支持 16×16×16」「数据发射器仅单块 16×16」两行的「计划」列标注为「通用化阶段（阶段二后续）」，并新增一行：「`vta.gemm` 的 m,n,k 来自 operand 形状，verifier 仅认 16×16 → 通用化阶段放开」。
 
-- [ ] **Step 3：提交**
+- [x] **Step 3：提交**
 ```bash
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /mnt/c/MLIR-VTA/mlir-vta' \
   'git add -A' 'git commit -m "docs(mlir-vta): update DESIGN for phase-2 linalg entry"' \
