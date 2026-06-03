@@ -59,66 +59,127 @@ struct LowerVTAGemmPass
       constexpr int64_t kInpBuf = 128, kWgtBuf = 1024, kAccBuf = 128;
       const bool isOverfit = (nbA >= kInpBuf || nbB >= kWgtBuf || nbC >= kAccBuf);
 
-      // Strategy-1 parameters (used for both overfit and CASE-1 paths).
-      // CASE-1: delta == Kb, nbDelta == 1, remainder == 0 (single step covers all).
-      const int64_t bufSize = std::min({kInpBuf, kWgtBuf, kAccBuf});
-      const int64_t delta = std::min(bufSize, Kb);
-      const int64_t nbDelta = Kb / delta;
-      const int64_t remainder = Kb % delta;
+      // Strategy selector: from the op attribute (default 1).
+      const int64_t strategyId = g.strategy();
 
-      // Build the UOP table.
-      //
-      // CASE-1 (no overfit): UOP entries use global block indices (a*16, bb) so
-      // that the GEMM instruction's loop factors expand them into per-row
-      // addresses.  This matches the Phase-3 golden byte-for-byte.
-      //
-      // Overfit (Strategy-1): Each step loads delta A and B blocks into SRAM
-      // starting at offset 0, so UOP src/wgt use SRAM-local indices (k_local).
-      // The UOP entries for all C-block/delta-step/remainder combinations are
-      // appended in order; each group is independently loaded by its own
-      // "LOAD UOP" instruction.
+      // Strategy-1/CASE-1 parameters.
+      const int64_t bufSize = std::min({kInpBuf, kWgtBuf, kAccBuf});
+      const int64_t delta1 = std::min(bufSize, Kb);  // strategy-1 K-chunk
+      const int64_t nbDelta1 = Kb / delta1;
+      const int64_t rem1 = Kb % delta1;
+
+      // Strategy-2 tile parameters (region-based).
+      // tile_h x tile_w ACC tile; tile_k K-chunk limited by INP/WGT capacity.
+      int64_t tile_h = (int64_t)std::sqrt((double)kAccBuf);
+      while (tile_h > 0 && kAccBuf % tile_h != 0) tile_h--;
+      if (tile_h == 0) tile_h = 1;
+      int64_t tile_w = kAccBuf / tile_h;
+      tile_h = std::min(tile_h, Mb);
+      tile_w = std::min(tile_w, Nb);
+      int64_t tile_k = Kb;
+      if (tile_h > 0) tile_k = std::min(tile_k, kInpBuf / tile_h);
+      if (tile_w > 0) tile_k = std::min(tile_k, kWgtBuf / tile_w);
+      if (tile_k == 0) tile_k = 1;
+
+      // Strategy-3 parameters (column-major: delta rows per B-column step).
+      const int64_t delta3 = std::min(bufSize, Mb);
+      const int64_t nbDelta3 = Mb / delta3;
+      const int64_t rem3 = Mb % delta3;
+
+      // Strategy-4 parameters (row-major: delta cols per A-row step).
+      const int64_t delta4 = std::min(bufSize, Nb);
+      const int64_t nbDelta4 = Nb / delta4;
+      const int64_t rem4 = Nb % delta4;
+
+      // Build the UOP table (reset placeholder + gemm uops).
       SmallVector<int64_t> uopDst, uopSrc, uopWgt;
-      // UOP 0 is the reset placeholder (used by the reset GEMM's uop[0,1)).
-      uopDst.push_back(0);
-      uopSrc.push_back(0);
-      uopWgt.push_back(0);
+      uopDst.push_back(0); uopSrc.push_back(0); uopWgt.push_back(0); // reset
 
       if (!isOverfit) {
-        // CASE-1: global-index UOP entries (Phase-3 existing logic).
+        // CASE-1: global-index UOP entries.
         for (int64_t a = 0; a < nbA; ++a) {
           int64_t i = a / Kb, k = a % Kb;
           for (int64_t bb = 0; bb < nbB; ++bb) {
             int64_t bk = bb / Nb, j = bb % Nb;
-            if (bk != k)
-              continue;
+            if (bk != k) continue;
             int64_t cIdx = i * Nb + j;
             uopDst.push_back(cIdx * 16);
             uopSrc.push_back(a * 16);
             uopWgt.push_back(bb);
           }
         }
-      } else {
-        // Strategy-1: SRAM-local-index UOP entries.
-        // For each C block, for each delta-step, for each k_local in [0,delta):
-        //   dst = 0 (C block always at SRAM offset 0)
-        //   src = k_local * 16 (A block at SRAM offset k_local)
-        //   wgt = k_local      (B block at SRAM offset k_local)
-        // Followed by remainder entries (k_local in [0,remainder)) if any.
+      } else if (strategyId == 1) {
+        // Strategy-1: SRAM-local indices; one group of uops per (C-block, step).
         for (int64_t idx = 0; idx < nbC; ++idx) {
-          for (int64_t dStep = 0; dStep < nbDelta; ++dStep) {
-            for (int64_t kLocal = 0; kLocal < delta; ++kLocal) {
+          for (int64_t dStep = 0; dStep < nbDelta1; ++dStep) {
+            for (int64_t kLocal = 0; kLocal < delta1; ++kLocal) {
               uopDst.push_back(0);
               uopSrc.push_back(kLocal * 16);
               uopWgt.push_back(kLocal);
             }
           }
-          if (remainder > 0) {
-            for (int64_t kLocal = 0; kLocal < remainder; ++kLocal) {
+          if (rem1 > 0) {
+            for (int64_t kLocal = 0; kLocal < rem1; ++kLocal) {
               uopDst.push_back(0);
               uopSrc.push_back(kLocal * 16);
               uopWgt.push_back(kLocal);
             }
           }
+        }
+      } else if (strategyId == 2) {
+        // Strategy-2: region-based tiling. For each (i_tile, j_tile, k_tile),
+        // load_A = tile_h*tile_k blocks, load_B = tile_k*tile_w blocks,
+        // load_C = tile_h*tile_w blocks. UOP per GeMM op in the tile:
+        //   dst = local_c * 16  (row-major within tile: local_c = local_i*cur_w + local_j)
+        //   src = local_i * 16  (local_i = local_c / cur_w, A row within tile)
+        //   wgt = local_j       (local_j = local_c % cur_w, B col within tile)
+        for (int64_t i = 0; i < Mb; i += tile_h) {
+          int64_t cur_h = std::min(tile_h, Mb - i);
+          for (int64_t j = 0; j < Nb; j += tile_w) {
+            int64_t cur_w = std::min(tile_w, Nb - j);
+            for (int64_t k = 0; k < Kb; k += tile_k) {
+              // cur_k unused for uop (each C-element pairs with one A-col and one B row)
+              // tile produces cur_h * cur_w gemm uops
+              for (int64_t lc = 0; lc < cur_h * cur_w; ++lc) {
+                int64_t li = lc / cur_w;  // local row in tile
+                int64_t lj = lc % cur_w;  // local col in tile
+                uopDst.push_back(lc * 16);
+                uopSrc.push_back(li * 16);
+                uopWgt.push_back(lj);
+              }
+            }
+          }
+        }
+      } else if (strategyId == 3) {
+        // Strategy-3: column-major (delta rows per B-column).
+        // For each delta_step x j x k: delta rows of A and C, 1 B col.
+        // UOP: dst = local_i*16, src = local_i*16, wgt = 0.
+        auto emit3 = [&](int64_t cur_delta) {
+          for (int64_t j = 0; j < Nb; ++j)
+            for (int64_t k = 0; k < Kb; ++k)
+              for (int64_t li = 0; li < cur_delta; ++li) {
+                uopDst.push_back(li * 16);
+                uopSrc.push_back(li * 16);
+                uopWgt.push_back(0);
+              }
+        };
+        for (int64_t ds = 0; ds < nbDelta3; ++ds) emit3(delta3);
+        if (rem3 > 0) emit3(rem3);
+      } else { // strategyId == 4
+        // Strategy-4: row-major (delta cols per A-row).
+        // For each i x delta_step x k: 1 A row, delta cols of B and C.
+        // UOP: dst = local_j*16, src = 0, wgt = local_j.
+        auto emit4 = [&](int64_t cur_delta) {
+          for (int64_t k = 0; k < Kb; ++k)
+            for (int64_t lj = 0; lj < cur_delta; ++lj) {
+              uopDst.push_back(lj * 16);
+              uopSrc.push_back(0);
+              uopWgt.push_back(lj);
+            }
+        };
+        for (int64_t i = 0; i < Mb; ++i) {
+          for (int64_t ds = 0; ds < nbDelta4; ++ds) emit4(delta4);
+          if (rem4 > 0) emit4(rem4);
         }
       }
       const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
@@ -226,122 +287,207 @@ struct LowerVTAGemmPass
         // UOP DRAM region (relative to UOP_base + 1).
         int64_t uopCursor = 0;
 
-        for (int64_t idx = 0; idx < nbC; ++idx) {
-          int64_t ci = idx / Nb; // row index in C block grid
-          int64_t cj = idx % Nb; // col index in C block grid
-          bool lastC = (idx == nbC - 1);
+        // Helper: emit one overfit step (INP/WGT/[ACC]/UOP/GEMM) and advance cursor.
+        // nbInp: y_size for INP LOAD; nbWgt: y_size for WGT LOAD;
+        // nbAcc: y_size for ACC LOAD (0 = skip ACC LOAD);
+        // nbUop: number of uop entries in this step;
+        // inpDramBase, wgtDramBase, accDramBase: logical DRAM addresses.
+        // pushNext: whether this GEMM should push CMP->ST (STORE follows).
+        // accPopNext: whether ACC LOAD should pop ST->CMP (prior tile's STORE exists).
+        auto emitStep = [&](int64_t nbInp, int64_t nbWgt, int64_t nbAcc, int64_t nbUop,
+                            int64_t inpDramBase, int64_t wgtDramBase, int64_t accDramBase,
+                            bool pushNext, bool accPopNext = false) {
+          b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP,
+                                   false, /*pop_next=*/true, false, false,
+                                   0, inpDramBase, nbInp, 16, 16);
+          b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT,
+                                   false, false, false, /*push_next=*/true,
+                                   0, wgtDramBase, nbWgt, 1, 1);
+          if (nbAcc > 0)
+            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC,
+                                     /*pop_prev=*/true, /*pop_next=*/accPopNext, false, false,
+                                     0, accDramBase, nbAcc, 16, 16);
+          b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
+                                   (nbAcc == 0) ? true : false,
+                                   false, false, false,
+                                   0, kUopBase + 1 + uopCursor, 1, nbUop, nbUop);
+          b.create<vtaisa::GemmInsnOp>(loc, false, false,
+                                       /*push_prev=*/true, /*push_next=*/pushNext,
+                                       false, 0, nbUop, 1, 16, 0, 1, 0, 1);
+          uopCursor += nbUop;
+        };
 
-          for (int64_t dStep = 0; dStep < nbDelta; ++dStep) {
-            bool isLastStepForC = (dStep == nbDelta - 1 && remainder == 0);
-            bool isAbsoluteLastStep = isLastStepForC && lastC;
-            // Global DRAM block indices for this delta-step's A and B tiles.
-            int64_t aStart = ci * Kb + dStep * delta;
-            int64_t bStart = dStep * delta * Nb + cj;
+        if (strategyId == 1) {
+          // Strategy-1: one C block per outer iteration, K split into delta1 chunks.
+          for (int64_t idx = 0; idx < nbC; ++idx) {
+            int64_t ci = idx / Nb, cj = idx % Nb;
+            bool lastC = (idx == nbC - 1);
 
-            // LOAD INP: delta blocks, starting at aStart*16 logical offset.
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP,
-                                     false, /*pop_next=*/true, false, false,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kInpBase + aStart * 16,
-                                     /*y_size=*/delta,
-                                     /*x_size=*/16, /*x_stride=*/16);
-
-            // LOAD WGT: delta blocks, starting at bStart logical offset.
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT,
-                                     false, false, false, /*push_next=*/true,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kWgtBase + bStart,
-                                     /*y_size=*/delta,
-                                     /*x_size=*/1, /*x_stride=*/1);
-
-            // LOAD ACC: only on the first step of each C block.
-            // pop_prev consumes the LD->CMP token produced by LOAD WGT above
-            // (or the CMP->LD / ST->CMP token, depending on step context).
-            // Semaphore analysis:
-            //   - First C block, first step: consume LD->CMP from LOAD WGT.
-            //   - Subsequent C blocks, first step: consume ST->CMP from previous STORE.
-            // In both cases pop_prev=1 is correct (upstream uses same bit).
-            if (dStep == 0) {
-              b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC,
-                                       /*pop_prev=*/true, false, false, false,
-                                       /*sram_base=*/0,
-                                       /*dram_base=*/kAccBase + idx * 16,
-                                       /*y_size=*/1,
-                                       /*x_size=*/16, /*x_stride=*/16);
+            for (int64_t dStep = 0; dStep < nbDelta1; ++dStep) {
+              bool isLastForC = (dStep == nbDelta1 - 1 && rem1 == 0);
+              bool isAbsLast = isLastForC && lastC;
+              int64_t aStart = ci * Kb + dStep * delta1;
+              int64_t bStart = dStep * delta1 * Nb + cj;
+              int64_t nbAcc = (dStep == 0) ? 1 : 0;
+              emitStep(delta1, delta1, nbAcc, delta1,
+                       kInpBase + aStart * 16, kWgtBase + bStart,
+                       kAccBase + idx * 16, isAbsLast);
             }
-
-            // LOAD UOP: delta gemm uop entries (no dep bits on delta-steps).
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
-                                     false, false, false, false,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kUopBase + 1 + uopCursor,
-                                     /*y_size=*/1,
-                                     /*x_size=*/delta, /*x_stride=*/delta);
-
-            // GEMM: push_prev=1 always (produce CMP->LD for next LOAD INP).
-            //       push_next=1 only on the absolute last step (signals STORE).
-            b.create<vtaisa::GemmInsnOp>(loc, false, false,
-                                         /*push_prev=*/true,
-                                         /*push_next=*/isAbsoluteLastStep,
-                                         /*reset=*/false, /*uop_bgn=*/0, /*uop_end=*/delta,
-                                         /*loop_out=*/1, /*loop_in=*/16,
-                                         /*dst_factor_out=*/0, /*dst_factor_in=*/1,
-                                         /*src_factor_out=*/0, /*src_factor_in=*/1);
-
-            uopCursor += delta;
+            if (rem1 > 0) {
+              int64_t aStart = ci * Kb + nbDelta1 * delta1;
+              int64_t bStart = nbDelta1 * delta1 * Nb + cj;
+              emitStep(rem1, rem1, /*nbAcc=*/0, rem1,
+                       kInpBase + aStart * 16, kWgtBase + bStart,
+                       0, /*isAbsLast=*/lastC);
+            }
+            b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
+                                      /*pop_prev=*/true, false, /*push_prev=*/true, false,
+                                      0, kOutBase + idx * 16, 1, 16, 16);
           }
+        } else if (strategyId == 2) {
+          // Strategy-2: region-based tiling.
+          // For each (i_tile, j_tile, k_tile): load tile_h*tile_k INP blocks,
+          // tile_k*tile_w WGT blocks, tile_h*tile_w ACC blocks, emit tile_h*tile_w uops.
+          // After all k_tile steps in a (i,j) tile: STORE the tile_h*tile_w C blocks.
+          int64_t totalSteps = 0;
+          // Count total steps to identify the absolute last one.
+          for (int64_t i = 0; i < Mb; i += tile_h)
+            for (int64_t j = 0; j < Nb; j += tile_w)
+              totalSteps += (Kb + tile_k - 1) / tile_k;
 
-          if (remainder > 0) {
-            bool isAbsoluteLastStep = lastC;
-            int64_t aStart = ci * Kb + nbDelta * delta;
-            int64_t bStart = nbDelta * delta * Nb + cj;
+          int64_t stepIdx = 0;
+           int64_t tilesDone = 0;  // number of tiles completed so far (STORE count)
 
-            // LOAD INP: remainder blocks.
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP,
-                                     false, /*pop_next=*/true, false, false,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kInpBase + aStart * 16,
-                                     /*y_size=*/remainder,
-                                     /*x_size=*/16, /*x_stride=*/16);
+           for (int64_t i = 0; i < Mb; i += tile_h) {
+             int64_t cur_h = std::min(tile_h, Mb - i);
+             for (int64_t j = 0; j < Nb; j += tile_w) {
+               int64_t cur_w = std::min(tile_w, Nb - j);
+               int64_t nCTile = cur_h * cur_w;
+               // Build c_indices for this tile (global C-block indices, row-major)
+               SmallVector<int64_t> cTile;
+               for (int64_t r = 0; r < cur_h; ++r)
+                 for (int64_t c = 0; c < cur_w; ++c)
+                   cTile.push_back((i + r) * Nb + (j + c));
 
-            // LOAD WGT: remainder blocks.
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT,
-                                     false, false, false, /*push_next=*/true,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kWgtBase + bStart,
-                                     /*y_size=*/remainder,
-                                     /*x_size=*/1, /*x_stride=*/1);
+               // If this is not the first tile, the previous tile's STORE produced
+               // a ST->CMP token; the first ACC LOAD of this tile must consume it.
+               bool hasPriorStore = (tilesDone > 0);
 
-            // LOAD UOP: pop_prev=1 to consume the LD->CMP token produced by
-            // LOAD WGT above (no LOAD ACC in remainder step).
-            b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
-                                     /*pop_prev=*/true, false, false, false,
-                                     /*sram_base=*/0,
-                                     /*dram_base=*/kUopBase + 1 + uopCursor,
-                                     /*y_size=*/1,
-                                     /*x_size=*/remainder, /*x_stride=*/remainder);
+               for (int64_t k_step = 0, k = 0; k < Kb; k += tile_k, ++k_step) {
+                 int64_t cur_k = std::min(tile_k, Kb - k);
+                 int64_t nATile = cur_h * cur_k;
+                 int64_t nBTile = cur_k * cur_w;
+                 int64_t nUopTile = nCTile;
+                 bool isFirst = (k_step == 0);
+                 bool isLastK = (k + tile_k >= Kb);
+                 bool pushNext = isLastK;  // STORE follows the last k-step
+                 ++stepIdx;
 
-            // GEMM: push_prev=1 (CMP->LD), push_next=1 on absolute last step.
-            b.create<vtaisa::GemmInsnOp>(loc, false, false,
-                                         /*push_prev=*/true,
-                                         /*push_next=*/isAbsoluteLastStep,
-                                         /*reset=*/false, /*uop_bgn=*/0, /*uop_end=*/remainder,
-                                         /*loop_out=*/1, /*loop_in=*/16,
-                                         /*dst_factor_out=*/0, /*dst_factor_in=*/1,
-                                         /*src_factor_out=*/0, /*src_factor_in=*/1);
+                 int64_t nbAcc = isFirst ? nCTile : 0;
+                 int64_t inpBase = kInpBase + (i * Kb + k) * 16;
+                 int64_t wgtBase = kWgtBase + k * Nb + j;
+                 int64_t accBase = kAccBase + cTile[0] * 16;
+                 // First k-step of a non-first tile: ACC LOAD must also pop ST->CMP.
+                 bool accPopNext = isFirst && hasPriorStore;
+                 emitStep(nATile, nBTile, nbAcc, nUopTile,
+                          inpBase, wgtBase, accBase, pushNext, accPopNext);
+               }
+               // STORE the tile's C blocks one by one.
+               for (int64_t lc = 0; lc < nCTile; ++lc) {
+                 bool pop = (lc == 0);
+                 bool push = (lc == nCTile - 1);
+                 b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
+                                           pop, false, push, false,
+                                           lc * 16, kOutBase + cTile[lc] * 16, 1, 16, 16);
+               }
+               ++tilesDone;
+             }
+           }
+        } else if (strategyId == 3) {
+          // Strategy-3: column-major (delta3 rows of C per step, iterating B-columns × K).
+          // Outer: delta_step → j → k; inner LOAD: delta3 A rows + 1 B col.
+          int64_t totalTiles = (nbDelta3 + (rem3 > 0 ? 1 : 0)) * Nb * Kb;
+          int64_t stepIdx = 0;
 
-            uopCursor += remainder;
+          int64_t s3tilesDone = 0;
+           auto emit3Tiles = [&](int64_t cur_delta, int64_t row_start) {
+             for (int64_t j = 0; j < Nb; ++j) {
+               bool hasPriorStore = (s3tilesDone > 0);
+               for (int64_t k = 0; k < Kb; ++k) {
+                  ++stepIdx;
+                  bool isFirstK = (k == 0);
+                  bool isLastK = (k == Kb - 1);
+                  bool pushNext = isLastK;
+                  int64_t nbAcc = isFirstK ? cur_delta : 0;
+                  bool accPopNext = isFirstK && hasPriorStore;
+                  int64_t inpBase = kInpBase + (row_start * Kb + k) * 16;
+                  int64_t wgtBase = kWgtBase + k * Nb + j;
+                  int64_t accBase = kAccBase + (row_start * Nb + j) * 16;
+                  emitStep(cur_delta, 1, nbAcc, cur_delta,
+                           inpBase, wgtBase, accBase, pushNext, accPopNext);
+
+                if (isLastK) {
+                   // STORE this column strip's cur_delta C blocks.
+                   for (int64_t li = 0; li < cur_delta; ++li) {
+                     int64_t cBlk = (row_start + li) * Nb + j;
+                     bool pop = (li == 0);
+                     bool push = (li == cur_delta - 1);
+                     b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
+                                               pop, false, push, false,
+                                               li * 16, kOutBase + cBlk * 16, 1, 16, 16);
+                   }
+                   ++s3tilesDone;
+                 }
+               }
+             }
+           };
+
+          for (int64_t ds = 0; ds < nbDelta3; ++ds)
+            emit3Tiles(delta3, ds * delta3);
+          if (rem3 > 0)
+            emit3Tiles(rem3, nbDelta3 * delta3);
+
+        } else { // strategyId == 4
+          // Strategy-4: row-major (delta4 cols of C per step, iterating A-rows × K).
+          // Outer: i → delta_step → k; inner LOAD: 1 A row + delta4 B cols.
+          int64_t stepIdx = 0;
+           int64_t s4tilesDone = 0;
+
+          auto emit4Tiles = [&](int64_t i, int64_t cur_delta, int64_t col_start) {
+             bool hasPriorStore = (s4tilesDone > 0);
+             for (int64_t k = 0; k < Kb; ++k) {
+               ++stepIdx;
+               bool isFirstK = (k == 0);
+               bool isLastK = (k == Kb - 1);
+               bool pushNext = isLastK;
+               int64_t nbAcc = isFirstK ? cur_delta : 0;
+               bool accPopNext = isFirstK && hasPriorStore;
+               int64_t inpBase = kInpBase + (i * Kb + k) * 16;
+               int64_t wgtBase = kWgtBase + k * Nb + col_start;
+               int64_t accBase = kAccBase + (i * Nb + col_start) * 16;
+               emitStep(1, cur_delta, nbAcc, cur_delta,
+                        inpBase, wgtBase, accBase, pushNext, accPopNext);
+
+              if (isLastK) {
+                 for (int64_t lj = 0; lj < cur_delta; ++lj) {
+                   int64_t cBlk = i * Nb + col_start + lj;
+                   bool pop = (lj == 0);
+                   bool push = (lj == cur_delta - 1);
+                   b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
+                                             pop, false, push, false,
+                                             lj * 16, kOutBase + cBlk * 16, 1, 16, 16);
+                 }
+                 ++s4tilesDone;
+               }
+             }
+           };
+
+          for (int64_t i = 0; i < Mb; ++i) {
+            for (int64_t ds = 0; ds < nbDelta4; ++ds)
+              emit4Tiles(i, delta4, ds * delta4);
+            if (rem4 > 0)
+              emit4Tiles(i, rem4, nbDelta4 * delta4);
           }
-
-          // STORE OUT: after all steps for this C block are done.
-          // pop_prev=1 consumes the CMP->ST token from the last GEMM's push_next.
-          // push_prev=1 produces the ST->CMP token for the next C block's LOAD ACC.
-          b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
-                                    /*pop_prev=*/true, false,
-                                    /*push_prev=*/true, false,
-                                    /*sram_base=*/0,
-                                    /*dram_base=*/kOutBase + idx * 16,
-                                    /*y_size=*/1, /*x_size=*/16, /*x_stride=*/16);
         }
       }
 

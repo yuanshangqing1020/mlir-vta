@@ -8,7 +8,8 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
   // Optional `name` is the layer NAME (file suffix) for multi-layer compilation;
   // absent/"" means a single unnamed layer (instructions.bin without suffix).
   let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc,
-                       OptionalAttr<StrAttr>:$name);
+                       OptionalAttr<StrAttr>:$name,
+                       DefaultValuedAttr<I64Attr, "1">:$strategy);
   let results = (outs);
   let assemblyFormat =
     "`ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)` "
@@ -32,6 +33,9 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
     if (k2 != k || am != m || an != n)
       return emitOpError("vta.gemm shape mismatch: expected lhs MxK, rhs KxN, "
                          "acc MxN");
+    int64_t s = strategy();
+    if (s < 1 || s > 4)
+      return emitOpError("vta.gemm strategy must be in [1,4], got ") << s;
     return ::mlir::success();
   }];
 }
