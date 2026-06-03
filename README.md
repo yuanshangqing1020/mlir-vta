@@ -13,7 +13,7 @@
 |------|------|------|
 | 阶段一 | ✅ 完成 | 手写 `vtaisa.*` / `vta.gemm` → 二进制，与 Python 编译器 **字节级一致**，FSIM 验证 |
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
-| 阶段三 | 🚧 进行中（通用 GEMM·32×32 多块） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位）；32×32 端到端结果矩阵与上游黄金一致，`instructions/uop/数据 bin` 字节级一致 |
+| 阶段三 | 🚧 进行中（通用 GEMM·任意 16 倍数维） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 均端到端结果矩阵与上游黄金一致，`instructions/uop/数据 bin/CSV` **8 文件字节级一致** |
 
 尚未实现（后续增量）：overfit 多 step（strategy_1..4）、依赖信号量通用推导 pass、独立地址分配 pass、ALU/卷积 lowering、ONNX 前端（`onnx-mlir`）、整网。
 
@@ -25,7 +25,7 @@
 
 | 操作 | 语法 | 说明 |
 |------|------|------|
-| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 逻辑基址仍为固定值（单层 < 1 页），每块偏移按块算。 |
+| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 缓冲基址由 `computeGemmLayout` 按 4 KiB 页对齐计算（复刻上游 `dram_allocation`，随矩阵尺寸变化），每块偏移按块算。 |
 
 **operand → 缓冲角色约定**（与数据发射器 / `memory_addresses.csv` 一致）：
 
@@ -158,6 +158,12 @@ mkdir -p /tmp/out32
 
 > 32×32 → 2×2 块（CASE 1 无 overfit，单 step）：14 条指令 + 9 条 UOP + 4 条逐块 STORE。
 > `--rows M --cols N --k K` 对应 `A[M×K]`、`B[K×N]`、`C[M×N]`，三者均须为 16 的倍数。
+>
+> **矩形 / 更多块同理**（块维由形状推导）。入口与黄金已备：
+> `test/Target/matmul_tensor_32x48x16.mlir`（`C[32×16]=A[32×48]·B[48×16]`，2×3×1 块）、
+> `test/Target/matmul_tensor_48x48x48.mlir`（3×3 块）。注意 **DRAM 基址随尺寸变化**：
+> `32×48×16` 的 INP 占 1.5 页，把 WGT/ACC/OUT/UOP 逻辑基址顶到 12/256/320/6144（不再是
+> 16×16/32×32 的 8/192/256/5120），`vta-translate` 的 `memory_addresses.csv` 会自动跟随。
 
 ### 5) 字节级回归（对比黄金参考）
 
@@ -170,17 +176,23 @@ cmp /tmp/out32/instructions.bin test/golden/matmul_32x32/instructions.bin && ech
 cmp /tmp/out32/uop.bin          test/golden/matmul_32x32/uop.bin          && echo "32x32 UOP OK"
 cmp /tmp/out32/input.bin        test/golden/matmul_32x32/input.bin        && echo "32x32 INP OK"
 cmp /tmp/out32/weight.bin       test/golden/matmul_32x32/weight.bin       && echo "32x32 WGT OK"
+
+# 矩形 / 更多块：8 文件（含 CSV）字节级 + FSIM 结果一站式验收
+scripts/run_fsim_gemm.sh 32 48 16   # C[32×16]=A[32×48]·B[48×16]，对齐 test/golden/matmul_32x48x16/
+scripts/run_fsim_gemm.sh 48 48 48   # 3×3 块，对齐 test/golden/matmul_48x48x48/
 ```
 
 ### 6) 重新生成黄金参考（固定随机种子）
 
 ```bash
-scripts/make_golden.sh        # 调用 standalone-vta 的 Python 编译器，刷新 test/golden/（16×16）
+scripts/make_golden.sh           # 调用 standalone-vta 的 Python 编译器，刷新 test/golden/（16×16）
+scripts/make_golden_gemm.sh 32 48 16  # 任意 16 倍数 M K N → test/golden/matmul_MxKxN/（8 文件 + FSIM 结果）
 ```
 
 > 32×32 黄金（`test/golden/matmul_32x32/`）由上游 `main_vta_compiler.py` 跑
 > `standalone-vta/examples/vta_ir/matmul_32x32.json` 生成，流程见
-> [`docs/plans/spike-generalized-gemm-notes.md`](docs/plans/spike-generalized-gemm-notes.md)。
+> [`docs/plans/spike-generalized-gemm-notes.md`](docs/plans/spike-generalized-gemm-notes.md)；
+> 矩形/更多块黄金用 `scripts/make_golden_gemm.sh <M> <K> <N>` 生成。
 
 ### 7) FSIM 端到端验证
 
@@ -188,6 +200,7 @@ scripts/make_golden.sh        # 调用 standalone-vta 的 Python 编译器，刷
 scripts/run_fsim.sh              # 阶段一：gemm16x16.mlir → FSIM
 scripts/run_fsim_linalg.sh       # 阶段二：matmul_tensor.mlir 完整管道 → FSIM + 结果矩阵自校验
 scripts/run_fsim_linalg_32x32.sh # 阶段三：matmul_tensor_32x32.mlir 多块管道 → FSIM + 4 块结果矩阵自校验
+scripts/run_fsim_gemm.sh M K N   # 阶段三通用：任意 16 倍数维 → 完整管道 → FSIM + 结果矩阵对齐黄金
 ```
 
 ## 工程结构

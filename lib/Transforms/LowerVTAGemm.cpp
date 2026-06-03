@@ -3,6 +3,7 @@
 #include "mlir-vta/Dialect/VTA/VTAOps.h"
 #include "mlir-vta/Dialect/VTAISA/VTAISADialect.h"
 #include "mlir-vta/Dialect/VTAISA/VTAISAOps.h"
+#include "mlir-vta/VTAGemmLayout.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -27,15 +28,6 @@ struct LowerVTAGemmPass
     ModuleOp module = getOperation();
     SmallVector<vta::GemmOp> targets;
     module.walk([&](vta::GemmOp g) { targets.push_back(g); });
-
-    // Fixed buffer logical base addresses (page-aligned by the upstream
-    // dram_allocation; identical across 16x16 / 32x32 since a single layer
-    // fits in one 4 KiB page). Per-block offsets are derived from these.
-    constexpr int64_t kUopBase = 5120; // 0x1400
-    constexpr int64_t kInpBase = 64;   // 0x40
-    constexpr int64_t kWgtBase = 8;    // 0x8
-    constexpr int64_t kAccBase = 192;  // 0xc0
-    constexpr int64_t kOutBase = 256;  // 0x100
 
     for (vta::GemmOp g : targets) {
       auto lhsT = g.lhs().getType().dyn_cast<MemRefType>();
@@ -88,6 +80,13 @@ struct LowerVTAGemmPass
         }
       }
       const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
+
+      // Page-aligned DRAM layout (replicates upstream dram_allocation). Bases
+      // shift with matrix size, so they must be computed, not hardcoded.
+      const vta::GemmLayout L = vta::computeGemmLayout(Mb, Kb, Nb);
+      const int64_t kUopBase = L.uopLogical, kInpBase = L.inpLogical,
+                    kWgtBase = L.wgtLogical, kAccBase = L.accLogical,
+                    kOutBase = L.outLogical;
 
       OpBuilder b(g);
       Location loc = g.getLoc();

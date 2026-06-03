@@ -1,4 +1,5 @@
 #include "mlir-vta/Target/VTADataEmitter.h"
+#include "mlir-vta/VTAGemmLayout.h"
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/raw_ostream.h"
@@ -117,48 +118,49 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
       failed(writeBinary((outDir + "/out_init.bin").str(), zeros)))
     return failure();
 
-  auto sq = [](unsigned a, unsigned b) { return a == b ? "True" : "False"; };
-
+  // The "Is it square?" column is a fixed per-role flag in the upstream
+  // compiler (data_definition.py): A/Y/BS = True, X = doExpandBias (False for
+  // pure GEMM), C = doStoreFullMatrix (True for pure GEMM). It is NOT derived
+  // from the actual dimensions, so rectangular matrices still report True.
   // Python's csv writer terminates rows with CRLF, so reproduce \r\n exactly.
   std::string metadata =
       "Matrix (or Block Size),Nb rows,Nb columns,Is it square?\r\n"
       "BS,16,16,True\r\n";
   metadata += "A," + std::to_string(mRows) + "," + std::to_string(kDimElems) +
-              "," + sq(mRows, kDimElems) + "\r\n";
-  // The accumulator/bias matrix X is reported non-square by the upstream
-  // compiler regardless of its actual shape.
+              ",True\r\n";
   metadata += "X," + std::to_string(mRows) + "," + std::to_string(nCols) +
               ",False\r\n";
   metadata += "Y,0,0,True\r\n";
-  metadata += "C," + std::to_string(mRows) + "," + std::to_string(nCols) + "," +
-              sq(mRows, nCols) + "\r\n";
+  metadata += "C," + std::to_string(mRows) + "," + std::to_string(nCols) +
+              ",True\r\n";
 
-  static const char *kMemoryAddresses =
-      "Buffer type,Physical address (hex),Logical address (hex)\r\n"
-      "INP,0x1000,0x40\r\n"
-      "WGT,0x2000,0x8\r\n"
-      "ACC,0x3000,0xc0\r\n"
-      "OUT,0x4000,0x100\r\n"
-      "UOP,0x5000,0x1400\r\n"
-      "INSN,0x6000,0x600\r\n";
+  // memory_addresses.csv: page-aligned bases that shift with matrix size
+  // (computed identically to the lowering and the upstream dram_allocation).
+  const vta::GemmLayout L = vta::computeGemmLayout(Mb, Kb, Nb);
+  auto hx = [](int64_t v) {
+    char buf[20];
+    std::snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)v);
+    return std::string(buf);
+  };
+  std::string memoryAddresses =
+      "Buffer type,Physical address (hex),Logical address (hex)\r\n";
+  memoryAddresses += "INP," + hx(L.inpPhys) + "," + hx(L.inpLogical) + "\r\n";
+  memoryAddresses += "WGT," + hx(L.wgtPhys) + "," + hx(L.wgtLogical) + "\r\n";
+  memoryAddresses += "ACC," + hx(L.accPhys) + "," + hx(L.accLogical) + "\r\n";
+  memoryAddresses += "OUT," + hx(L.outPhys) + "," + hx(L.outLogical) + "\r\n";
+  memoryAddresses += "UOP," + hx(L.uopPhys) + "," + hx(L.uopLogical) + "\r\n";
+  memoryAddresses += "INSN," + hx(L.insnPhys) + "," + hx(L.insnLogical) + "\r\n";
 
-  // layers_name.csv last physical DRAM address = INSN base (0x6000) + insn bytes
-  // - 1. For the CASE-1 single-step schedule there are (10 + Mb*Nb) instructions
-  // of 16 bytes each (matches the lowering's fixed skeleton).
-  unsigned numInsns = 10 + Mb * Nb;
-  unsigned lastPhys = 0x6000 + numInsns * 16 - 1;
-  char lastPhysHex[16];
-  std::snprintf(lastPhysHex, sizeof(lastPhysHex), "0x%x", lastPhys);
   std::string layersName =
       "Line identifier,Nb of VTA IR,Provide execution log\r\n"
       "nb_vta_ir,1,True\r\n"
       "Line identifier,VTA IR name,Last physical DRAM address allocated by the "
       "layer\r\n";
-  layersName += std::string("0,,") + lastPhysHex + "\r\n";
+  layersName += "0,," + hx(L.lastPhys) + "\r\n";
 
   if (failed(writeText((outDir + "/metadata.csv").str(), metadata)) ||
       failed(writeText((outDir + "/memory_addresses.csv").str(),
-                       std::string(kMemoryAddresses))) ||
+                       memoryAddresses)) ||
       failed(writeText((outDir + "/layers_name.csv").str(), layersName)))
     return failure();
 

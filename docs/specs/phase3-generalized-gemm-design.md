@@ -21,7 +21,7 @@
 | **第一个目标** | **32×32×32**（各维 2 块，`nb_A=nb_B=nb_C=4`）。这是能强迫出真实多块 tiling + K 维 reduce + 多块地址 + 多 STORE 的**最小**用例。 |
 | **是否用 MLIR linalg-tile** | **不用**。上游的"分块"是自定义块调度（单 step、单 GEMM 指令带 N 条 uop、合并 LOAD），与 MLIR 循环 tiling 产出的 scf 嵌套形态不符。改为让 `vta.gemm` 承载完整 N×N memref，由 lowering **内部**复刻上游块调度。 |
 | **溢出（overfit）** | 本阶段只做 **CASE 1（无 overfit，单 step）**。默认配置容量极大（INP/ACC/OUT 各 128 块、WGT 1024 块），32×32 远不溢出。strategy_1..4（多 step）留作后续增量。 |
-| **地址分配** | 本阶段**不**引入独立 dram_allocation pass；沿用第一阶段的固定缓冲逻辑基址（INP=64/WGT=8/ACC=192/OUT=256/UOP=5120），由 lowering 按块布局**计算每块偏移**。完整页对齐多层分配 pass 留作后续增量。 |
+| **地址分配** | 本阶段**不**引入独立 dram_allocation pass，但缓冲基址改为**页对齐计算**（`include/mlir-vta/VTAGemmLayout.h::computeGemmLayout`，复刻上游 `dram_allocation`：4 KiB 页、对象序 INP/WGT/ACC/OUT/UOP/INSN）。16×16/32×32 恰好得 INP=64/WGT=8/ACC=192/OUT=256/UOP=5120，但 INP 跨页（如 32×48×16）后基址会顺移。多层分配 pass 留作后续增量。 |
 | **依赖信号量** | 本阶段实现 **4 计数器信号量算法**（LD↔CMP↔ST），覆盖单 step 多块；它本就是上游通用机制，借此一步到位、为多 step 铺路。 |
 | **ALU** | 不做（纯 GEMM）。 |
 | **验收** | `fsim_only` 为门（结果矩阵 == 上游黄金）；字节级 `cmp` 为强信号。 |
@@ -112,10 +112,10 @@ vtaisa.* 指令流 ── vta-translate ──► instructions.bin / uop.bin
 | `weight.bin` | **块主序、每块转置**：同序，但每个 16×16 块写出前 `.T` |
 | `accumulator.bin` / `out_init.bin` | `nbC × 256` 个 int32 零 |
 | `metadata.csv` | `BS,16,16,True` + `A/X/Y/C` 维度行（见黄金 `metadata.csv`） |
-| `memory_addresses.csv` | 固定 6 行：INP/WGT/ACC/OUT/UOP/INSN 的物理/逻辑基址（本阶段沿用固定基址） |
+| `memory_addresses.csv` | 6 行：INP/WGT/ACC/OUT/UOP/INSN 的物理/逻辑基址，由 `computeGemmLayout` 页对齐计算（随尺寸变化） |
 | `layers_name.csv` | 复用（单层） |
 
-## 8. operand → DRAM 缓冲映射（沿用第一/二阶段固定基址）
+## 8. operand → DRAM 缓冲映射（页对齐计算，下表为 16×16/32×32 取值）
 
 | operand | 缓冲 | 逻辑基址 | 每块偏移 |
 |---------|------|----------|----------|
@@ -124,7 +124,7 @@ vtaisa.* 指令流 ── vta-translate ──► instructions.bin / uop.bin
 | `outs` (M×N) | ACC/OUT | 192 / 256 | +16/块 |
 | UOP | UOP | 5120 | +1/uop |
 
-> 这些基址与第一阶段 16×16 相同（页对齐 + 同对象顺序 + 单层 < 1 页），故 32×32 直接复用；通用化阶段后续再引入真正的 allocation pass。
+> 这些基址在 16×16/32×32 与第一阶段相同（每对象 ≤1 页）；一旦某缓冲跨页（如 32×48×16 的 INP=1.5 页），后续基址会按 `computeGemmLayout` 顺移。独立 allocation pass（多层）留作后续增量。
 
 ## 9. 数值约定边界
 

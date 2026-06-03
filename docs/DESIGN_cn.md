@@ -62,7 +62,7 @@ flowchart TD
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
-| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位；后续：overfit 多 step、依赖信号量通用推导 pass、ALU lowering、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·32×32 多块已落地）|
+| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM；后续：overfit 多 step、依赖信号量通用推导 pass、独立地址分配 pass、ALU lowering、`matrix_partitioning` 等价 tiling 策略 | 🚧 进行中（通用 GEMM·任意 16 倍数维已落地）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流
@@ -248,7 +248,8 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 | `input.bin` | 原样拷贝（单块无需重排） |
 | `weight.bin` | 转置 `W[r][c] → out[c][r]`，行主序写出 |
 | `accumulator.bin` / `out_init.bin` | 256 个 int32 零 |
-| `metadata.csv` / `memory_addresses.csv` / `layers_name.csv` | 硬编码文本，**行尾用 CRLF（`\r\n`）** |
+| `metadata.csv` | 按维度参数化（`square` 列是角色固定值：A/Y/BS=True、X=False、C=True，**非**按行列相等计算），**CRLF** |
+| `memory_addresses.csv` / `layers_name.csv` | 由 `computeGemmLayout` 页对齐计算物理/逻辑地址与末地址，**CRLF** |
 
 > **关键坑：** Python `csv` 模块用 CRLF 行尾。用 `\n` 会导致 CSV 第一行就字节不匹配。
 
@@ -264,7 +265,9 @@ static void appendUop (std::vector<uint8_t>&, uint32_t u);
 - 逻辑：`module.walk` 收集所有 `vta::GemmOp`；维度约束（16 倍数 + 形状匹配）已由 ODS verifier 在 IR 层保证。
 - **阶段三通用化（多块·CASE 1 无 overfit）**：pass 从 operand 形状求块维 `Mb=M/16, Kb=K/16, Nb=N/16`，按上游 `get_gemm_operations`（行主序、`A[i,k]·B[k,j]→C[i,j]`、`(a 升序, b 升序)`）产出 GeMM 列表与 UOP 表（每 GeMM 一条 `dst=c·16, src=a·16, wgt=b`，表首加 1 条 reset 占位），再发射：LOAD UOP(reset) + reset GEMM + 合并 LOAD INP/WGT/ACC（`y_size=块数`）+ LOAD UOP(gemm, `x=G`) + 主 GEMM(`uop[0,G)`) + 逐块 STORE(`nbC` 条) + 终止 NOP + FINISH。
 - 依赖位用 **CASE 1 单 step 信号量模式**（位置决定：reset GEMM push_prev、首 LOAD pop_next、末数据 LOAD push_next、ACC LOAD pop_prev、GEMM push_prev+push_next、首 STORE pop_prev、末 STORE push_prev、NOP 排空）。在 `Mb=Kb=Nb=1` 时**字节级退化为第一阶段 11 条 + 2 UOP**（回归 `cmp` 验证）。
-- 缓冲逻辑基址（INP=64/WGT=8/ACC=192/OUT=256/UOP=5120）仍沿用第一阶段固定值（单层 < 1 页，页对齐结果与多块相同），每块偏移按块算（INP/ACC/OUT +16、WGT +1、STORE dram=256+blk·16）。验证：`test/golden/matmul_32x32/{instructions,uop}.bin` 字节级一致。
+- **缓冲基址改为页对齐计算**（[`include/mlir-vta/VTAGemmLayout.h`](../include/mlir-vta/VTAGemmLayout.h)：`computeGemmLayout(Mb,Kb,Nb)`，复刻上游 `dram_allocation`）。按 4 KiB 页依次为 INP/WGT/ACC/OUT/UOP/INSN 排物理/逻辑地址：`phys = next_page(cur); logical = phys/divisor`（INP/ACC/OUT 除以 64、WGT 除以 1024、UOP 除以 4、INSN 除以 16）。每块偏移按块算（INP/ACC/OUT +16、WGT +1、STORE dram=OUT 基址+blk·16）。
+  - 16×16 与 32×32 恰好每对象 ≤1 页，结果仍是 INP=64/WGT=8/ACC=192/OUT=256/UOP=5120；但 **INP 跨页即变**：`32×48×16` INP=6144B=1.5 页 → WGT=**12**/ACC=**256**/OUT=**320**/UOP=**6144**；`48×48×48` → WGT=**16**/ACC=**448**/OUT=**640**/UOP=**13312**。该头文件被 lowering 与数据发射器共用，保证指令 dram_base 与 `memory_addresses.csv` 一致。
+- 验证（字节级 8/8 + FSIM 结果矩阵）：`matmul_32x32`（方阵）、`matmul_32x48x16`（矩形 Mb≠Nb、Kb=3 维约简）、`matmul_48x48x48`（3×3，`y_size=9`/9 条 STORE）。
 
 ### 7.1 当前限制 vs 阶段二通用化
 
@@ -313,7 +316,7 @@ CMake `find_package(MLIR REQUIRED CONFIG)`，依赖系统预装的 **LLVM/MLIR 1
 | 端到端 | lower → translate → `cmp` 黄金参考 | `test/Target/lower_gemm.mlir` |
 | 仿真 | 喂 FSIM 跑出结果矩阵 + profiler | `scripts/run_fsim.sh` |
 | linalg 端到端（阶段二）| `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，自校验结果矩阵等于黄金 | `scripts/run_fsim_linalg.sh`、`test/golden/fsim_result_16x16.txt` |
-| 通用 GEMM 端到端（阶段三）| `linalg.matmul`(32×32 tensor) → bufferize → `vta.gemm`(32×32) → 通用 lower → translate（多块数据）→ FSIM，自校验 4 块结果矩阵等于上游黄金；`instructions/uop/数据 bin` 亦字节级一致 | `scripts/run_fsim_linalg_32x32.sh`、`test/golden/matmul_32x32/` |
+| 通用 GEMM 端到端（阶段三）| `linalg.matmul`(任意 16 倍数 tensor) → bufferize → `vta.gemm` → 通用 lower → translate（多块数据）→ FSIM，自校验结果矩阵等于上游黄金；`instructions/uop/数据 bin/CSV` 8 文件字节级一致。覆盖方阵 32×32、**矩形 32×48×16**、**3×3 方阵 48×48×48** | `scripts/run_fsim_linalg_32x32.sh`、`scripts/run_fsim_gemm.sh <M> <K> <N>`、`scripts/make_golden_gemm.sh`、`test/golden/matmul_{32x32,32x48x16,48x48x48}/` |
 
 黄金参考由 [`scripts/make_golden.sh`](../scripts/make_golden.sh) 用**固定随机种子**调用 Python 编译器生成并提交到 `test/golden/`，保证可复现。指令序列与数据值无关（确定性），故可作字节基线。
 
@@ -393,7 +396,7 @@ vta-opt matmul_tensor.mlir \
 |----|------|------|
 | `LowerVTAGemm` 仅支持 CASE 1（无 overfit 单 step） | 块数超 SRAM 容量即报错 | 后续增量：overfit 多 step（strategy_1..4）|
 | 依赖位用 CASE 1 固定位置模式 | 单 step 正确（对齐黄金）；非通用 4 计数器推导 | 后续增量：多 step 通用信号量 pass |
-| 地址用固定逻辑基址 | 单层 < 1 页，与上游一致；无独立 allocation pass | 后续增量：复刻 `dram_allocation`（页对齐/多层）|
+| 地址分配内联在 lowering/发射器（`computeGemmLayout`）| 单层页对齐已字节对齐上游；尚无独立 allocation pass、不支持多层串联 | 后续增量：抽成独立 `dram-allocation` pass，支持多层/层间复用 |
 | 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 后续补 op verifier |
 | `alu_insn` 无 lowering/测试覆盖 | op 与发射器已实现但未被使用 | 后续 ALU lowering |
 | 无 `lit`/CTest 装配 | 测试靠脚本 `cmp`/`grep` 手跑 | 可选：加最小 lit 配置 |
