@@ -4,7 +4,8 @@
 本仓库与上游 `standalone-vta/`（VTA ISA、功能/周期仿真器、Python 参考编译器）平级，只负责 **MLIR 侧的编译器**。
 
 > 文档索引见 [`docs/README.md`](docs/README.md)。阶段一规格见 [`docs/specs/phase1-gemm-design.md`](docs/specs/phase1-gemm-design.md)；
-> 阶段二 linalg 入口见 [`docs/specs/phase2-linalg-entry-design.md`](docs/specs/phase2-linalg-entry-design.md)。
+> 阶段二 linalg 入口见 [`docs/specs/phase2-linalg-entry-design.md`](docs/specs/phase2-linalg-entry-design.md)；
+> 阶段三通用 GEMM 见 [`docs/specs/phase3-generalized-gemm-design.md`](docs/specs/phase3-generalized-gemm-design.md)。
 
 ## 当前状态
 
@@ -24,7 +25,7 @@
 
 | 操作 | 语法 | 说明 |
 |------|------|------|
-| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<16x16xi32>, memref<16x16xi32>) outs(%acc : memref<16x16xi32>)` | 单块 16×16 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，尺寸由 operand 形状推导；ODS verifier 拒绝非 16×16 memref。operand 在本阶段是信息性的（供未来地址分配 pass 使用），`lower-vta-gemm` 仍用硬编码 DRAM 地址生成指令。 |
+| `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 逻辑基址仍为固定值（单层 < 1 页），每块偏移按块算。 |
 
 **operand → 缓冲角色约定**（与数据发射器 / `memory_addresses.csv` 一致）：
 
@@ -59,14 +60,14 @@
 | `vtaisa.alu_insn` | 同 `gemm_insn` 因子字段 + `alu_opcode`, `use_imm`, `imm` | ALU 微操作循环（**已定义、尚未有 lowering**） |
 | `vtaisa.finish` | （无） | 程序结束标记 |
 
-**16×16 单块 GEMM 的固定序列**（由 `-lower-vta-gemm` 生成）：`uop_table` + **11 条** ISA 指令 + `finish` = 共 13 个 op。示例见 `test/Target/gemm16x16.mlir`。
+**GEMM 指令序列**（由 `-lower-vta-gemm` 生成，CASE 1 单 step）：`uop_table`(1 reset + G 条 GeMM uop) + `LOAD UOP(reset)` + `GEMM reset` + 合并 `LOAD INP/WGT/ACC`(`y_size=块数`) + `LOAD UOP(gemm)` + 主 `GEMM`(`uop[0,G)`) + **逐块 `STORE`**(`nbC` 条) + 2 条终止 NOP + `finish`，共 `(10 + nbC)` 条 ISA 指令。16×16（`Mb=Kb=Nb=1`）退化为 **11 条** 指令 + 2 UOP，与第一阶段字节级一致；32×32（2×2 块）为 14 条指令 + 9 UOP。示例见 `test/Target/gemm16x16.mlir`、`test/Target/matmul_tensor_32x32.mlir`。
 
 ### 编译 Pass（`vta-opt`）
 
 | Pass | 参数 | 作用 |
 |------|------|------|
-| `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义）→ `vta.gemm`；若仍是 tensor 语义则报错 |
-| `LowerVTAGemm` | `--lower-vta-gemm` | 单块 `vta.gemm` → 上述 13 个 `vtaisa.*` op |
+| `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义，任意 16 倍数维度）→ `vta.gemm`；若仍是 tensor 语义则报错 |
+| `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列（块调度 + UOP 表 + 合并 LOAD + 逐块 STORE + 依赖位）；仅支持 CASE 1（无 overfit 单 step） |
 
 `vta-opt` 同时注册全部上游 dialect/pass（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等），可直接跑完整中端管道。
 
@@ -99,21 +100,25 @@ cmake --build ~/mlir-vta-build -j"$(nproc)" --target vta-opt --target vta-transl
 ### 1) 阶段一：高层 `vta.gemm` → ISA → 二进制
 
 ```bash
-# 展开 vta.gemm 为 13 个 vtaisa op（含 uop_table + finish）
+# 展开 vta.gemm 为 vtaisa 指令序列（含 uop_table + finish）
 ~/mlir-vta-build/bin/vta-opt -lower-vta-gemm test/Target/lower_gemm.mlir -o /tmp/lowered.mlir
-# 发射二进制
+# 发射二进制（输出目录需预先存在）
+mkdir -p /tmp/out
 ~/mlir-vta-build/bin/vta-translate /tmp/lowered.mlir -o /tmp/out
 ls /tmp/out   # instructions.bin  uop.bin
 ```
 
+> `vta-translate` 不会自动创建 `-o` 目录，运行前请先 `mkdir -p`。
+
 ### 2) 阶段一：直接发射手写低层 MLIR + 数据/CSV
 
 ```bash
+mkdir -p /tmp/out
 ~/mlir-vta-build/bin/vta-translate test/Target/gemm16x16.mlir -o /tmp/out \
   --emit-data --input test/golden/input_16x16.bin --weight test/golden/weight_16x16.bin
 ```
 
-### 3) 阶段二：`linalg.matmul`(tensor) 完整管道
+### 3) 阶段二：`linalg.matmul`(16×16 tensor) 完整管道
 
 ```bash
 ~/mlir-vta-build/bin/vta-opt test/Target/matmul_tensor.mlir \
@@ -123,26 +128,61 @@ ls /tmp/out   # instructions.bin  uop.bin
   --convert-linalg-to-vta --canonicalize --lower-vta-gemm \
   -o /tmp/lowered.mlir
 
+mkdir -p /tmp/out
 ~/mlir-vta-build/bin/vta-translate /tmp/lowered.mlir -o /tmp/out \
   --emit-data --input test/golden/input_16x16.bin --weight test/golden/weight_16x16.bin
 ```
 
 > 入口 IR 用 `constant 0 : i32`（非 `arith.constant`），因本机 `vta-opt` 未注册 `arith` dialect。
 
-### 4) 字节级回归（对比黄金参考）
+### 4) 阶段三：`linalg.matmul`(32×32 tensor) 多块管道
+
+通用维度（16 的倍数）GEMM。**不用 `--linalg-tile`**——块调度在 `--lower-vta-gemm` 内部完成。
+数据发射用 `--rows/--cols/--k`（元素维，默认 16）指定矩阵尺寸，按块主序写出（WGT 每块转置）。
 
 ```bash
-cmp /tmp/out/instructions.bin test/golden/instructions.bin && echo "INSN OK"
-cmp /tmp/out/uop.bin          test/golden/uop.bin          && echo "UOP OK"
+# 入口 32×32 tensor → bufferize → vta.gemm(32×32) → 通用 lower → vtaisa
+~/mlir-vta-build/bin/vta-opt test/Target/matmul_tensor_32x32.mlir \
+  --linalg-bufferize --tensor-bufferize --tensor-constant-bufferize \
+  --func-bufferize --finalizing-bufferize \
+  --convert-linalg-to-vta --canonicalize --lower-vta-gemm \
+  -o /tmp/lowered32.mlir
+
+# 发射指令/UOP + 多块数据/CSV（C[32×32] = A[32×32] · B[32×32]）
+mkdir -p /tmp/out32
+~/mlir-vta-build/bin/vta-translate /tmp/lowered32.mlir -o /tmp/out32 \
+  --emit-data --rows 32 --cols 32 --k 32 \
+  --input test/golden/matmul_32x32/input_32x32.bin \
+  --weight test/golden/matmul_32x32/weight_32x32.bin
 ```
 
-### 5) 重新生成黄金参考（固定随机种子）
+> 32×32 → 2×2 块（CASE 1 无 overfit，单 step）：14 条指令 + 9 条 UOP + 4 条逐块 STORE。
+> `--rows M --cols N --k K` 对应 `A[M×K]`、`B[K×N]`、`C[M×N]`，三者均须为 16 的倍数。
+
+### 5) 字节级回归（对比黄金参考）
 
 ```bash
-scripts/make_golden.sh        # 调用 standalone-vta 的 Python 编译器，刷新 test/golden/
+# 阶段一/二（16×16）
+cmp /tmp/out/instructions.bin   test/golden/instructions.bin              && echo "16x16 INSN OK"
+cmp /tmp/out/uop.bin            test/golden/uop.bin                       && echo "16x16 UOP OK"
+# 阶段三（32×32：指令/UOP/数据 bin 全字节级一致）
+cmp /tmp/out32/instructions.bin test/golden/matmul_32x32/instructions.bin && echo "32x32 INSN OK"
+cmp /tmp/out32/uop.bin          test/golden/matmul_32x32/uop.bin          && echo "32x32 UOP OK"
+cmp /tmp/out32/input.bin        test/golden/matmul_32x32/input.bin        && echo "32x32 INP OK"
+cmp /tmp/out32/weight.bin       test/golden/matmul_32x32/weight.bin       && echo "32x32 WGT OK"
 ```
 
-### 6) FSIM 端到端验证
+### 6) 重新生成黄金参考（固定随机种子）
+
+```bash
+scripts/make_golden.sh        # 调用 standalone-vta 的 Python 编译器，刷新 test/golden/（16×16）
+```
+
+> 32×32 黄金（`test/golden/matmul_32x32/`）由上游 `main_vta_compiler.py` 跑
+> `standalone-vta/examples/vta_ir/matmul_32x32.json` 生成，流程见
+> [`docs/plans/spike-generalized-gemm-notes.md`](docs/plans/spike-generalized-gemm-notes.md)。
+
+### 7) FSIM 端到端验证
 
 ```bash
 scripts/run_fsim.sh              # 阶段一：gemm16x16.mlir → FSIM
@@ -168,10 +208,10 @@ mlir-vta/
 │   ├── vta-opt/            # 注册 vta+vtaisa dialect + pass 的 mlir-opt 变体
 │   └── vta-translate/      # MLIR → 二进制/数据/CSV
 ├── test/
-│   ├── Dialect/            # round-trip（vta.gemm ins/outs 格式）
-│   ├── Target/             # gemm16x16.mlir / lower_gemm.mlir / matmul_tensor.mlir
-│   └── golden/             # 字节级黄金参考 fixtures + fsim_result_16x16.txt
-├── scripts/                # make_golden.sh / run_fsim.sh / run_fsim_linalg.sh
+│   ├── Dialect/            # round-trip（vta.gemm ins/outs 格式，含 32×32）
+│   ├── Target/             # gemm16x16.mlir / lower_gemm.mlir / matmul_tensor*.mlir
+│   └── golden/             # 字节级黄金 fixtures + fsim_result_16x16.txt + matmul_32x32/
+├── scripts/                # make_golden.sh / run_fsim*.sh / run_fsim_linalg*.sh
 └── docs/                   # README.md、DESIGN_cn.md、plans/、specs/
 ```
 
