@@ -23,6 +23,7 @@ int main(int argc, char **argv) {
   std::string outDir = ".";
   bool emitData = false;
   std::string dataInput, dataWeight;
+  unsigned dataRows = 16, dataCols = 16, dataK = 16;
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -33,6 +34,12 @@ int main(int argc, char **argv) {
       dataInput = argv[++i];
     } else if (arg == "--weight" && i + 1 < argc) {
       dataWeight = argv[++i];
+    } else if (arg == "--rows" && i + 1 < argc) {
+      dataRows = std::stoul(argv[++i]);
+    } else if (arg == "--cols" && i + 1 < argc) {
+      dataCols = std::stoul(argv[++i]);
+    } else if (arg == "--k" && i + 1 < argc) {
+      dataK = std::stoul(argv[++i]);
     }
   }
 
@@ -64,7 +71,8 @@ int main(int argc, char **argv) {
                       "--weight\n";
       return 1;
     }
-    if (mlir::failed(mlir::vta::emitData(dataInput, dataWeight, outDir))) {
+    if (mlir::failed(mlir::vta::emitData(dataInput, dataWeight, outDir, dataRows,
+                                         dataK, dataCols))) {
       llvm::errs() << "vta-translate: data emission failed\n";
       return 1;
     }
