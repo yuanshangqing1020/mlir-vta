@@ -32,6 +32,7 @@
 | 操作 | 语法 | 说明 |
 |------|------|------|
 | `vta.gemm` | `vta.gemm ins(%lhs, %rhs : memref<MxKxi32>, memref<KxNxi32>) outs(%acc : memref<MxNxi32>)` | 块 GEMM：`acc += lhs * rhs`（原地累加在 `%acc` 上）。**无显式 `m,n,k` 属性**，块维 `Mb/Kb/Nb` 由 operand 形状推导；ODS verifier 要求各维为 **16 的倍数** 且 `lhs:MxK / rhs:KxN / acc:MxN` 形状匹配（阶段三放宽，阶段二仅认 16×16）。`lower-vta-gemm` 据形状做块调度生成指令；DRAM 缓冲基址由 `computeGemmLayout` 按 4 KiB 页对齐计算（复刻上游 `dram_allocation`，随矩阵尺寸变化），每块偏移按块算。可选 `{name="L0"}` 属性标记多层 NAME（文件后缀）。 |
+| `vta.alu` | `vta.alu ins(%acc : memref<Mx16xi32>) {alu_opcode, use_imm, imm}` | 逐行元素 ALU：对 ACC/OUT 缓冲的 M 行向量执行标量运算。`alu_opcode`：0=MIN, 1=MAX, 2=ADD, 3=SHR, 4=MUL；`use_imm=true` 时 `imm` 为立即数（如 ADD_IMM 的 shift bias）。verifier 要求 acc 为 `[M, 16]` 的 2D memref（列必须是 16）。`lower-vta-alu` 按行发射 UOP 表 + 单 ALU 指令 + 逐行 STORE；DRAM 布局 ACC/OUT/UOP 页对齐（无 INP/WGT）。可选 `{name="L0"}` 属性。 |
 
 **operand → 缓冲角色约定**（与数据发射器 / `memory_addresses.csv` 一致）：
 
@@ -63,10 +64,12 @@
 | `vtaisa.load` | `buffer_id`, `sram_base`, `dram_base`, `y_size`, `x_size`, `x_stride`, `y_pad_*`, `x_pad_*`, `pop_prev/next`, `push_prev/next` | DRAM → SRAM 加载 |
 | `vtaisa.store` | `buffer_id`, `sram_base`, `dram_base`, `y_size`, `x_size`, `x_stride`, `pop_prev/next`, `push_prev/next` | SRAM → DRAM 写回 |
 | `vtaisa.gemm_insn` | `uop_bgn`, `uop_end`, `loop_out`, `loop_in`, `dst/src/wgt_factor_*`, `reset`, `pop_prev/next`, `push_prev/next` | GEMM 微操作循环 |
-| `vtaisa.alu_insn` | 同 `gemm_insn` 因子字段 + `alu_opcode`, `use_imm`, `imm` | ALU 微操作循环（**已定义、尚未有 lowering**） |
+| `vtaisa.alu_insn` | 同 `gemm_insn` 因子字段 + `alu_opcode`, `use_imm`, `imm` | ALU 微操作循环（由 `lower-vta-alu` 生成） |
 | `vtaisa.finish` | （无） | 程序结束标记 |
 
 **GEMM 指令序列**（由 `-lower-vta-gemm` 生成，CASE 1 单 step）：`uop_table`(1 reset + G 条 GeMM uop) + `LOAD UOP(reset)` + `GEMM reset` + 合并 `LOAD INP/WGT/ACC`(`y_size=块数`) + `LOAD UOP(gemm)` + 主 `GEMM`(`uop[0,G)`) + **逐块 `STORE`**(`nbC` 条) + 2 条终止 NOP + `finish`，共 `(10 + nbC)` 条 ISA 指令。16×16（`Mb=Kb=Nb=1`）退化为 **11 条** 指令 + 2 UOP，与第一阶段字节级一致；32×32（2×2 块）为 14 条指令 + 9 UOP。示例见 `test/Target/gemm16x16.mlir`、`test/Target/matmul_tensor_32x32.mlir`。
+
+**ALU 指令序列**（由 `-lower-vta-alu` 生成）：`uop_table`(1 reset + M 条 ALU uop，每行 dst=i,src=0,wgt=0) + `LOAD UOP(reset)` + `GEMM reset`(push_prev=1) + `LOAD ACC`(M/16 块) + `LOAD UOP(alu)` + 主 `ALU`(uop[0,M),push_next=1) + **逐行 `STORE`**(`M` 条) + 2 条终止 NOP + `finish`，共 `(8 + M)` 条。ADD_IMM 16×16（M=16 行）：**24 条** 指令 + 17 UOP，字节级对齐上游 `alu_16x16` 黄金。DRAM 布局（无 INP/WGT）：ACC=0x40, OUT=0x80, UOP=0xc00（logical）。
 
 ### 编译 Pass（`vta-opt`）
 
@@ -75,7 +78,8 @@
 | `ConvertLinalgToVTA` | `--convert-linalg-to-vta` | 已 bufferize 的 `linalg.matmul`（memref 语义，任意 16 倍数维度）→ `vta.gemm`；若仍是 tensor 语义则报错 |
 | `VTADramAllocation` | `--vta-dram-allocation` | 多层：按出现顺序遍历各 `vta.gemm`，跨层页对齐 base 递增（复刻上游 `updated_base_address`），把逐层物理/逻辑基址写入模块属性 `vta.layers`，供 lowering/发射器逐层取用 |
 | `LowerVTAGemm` | `--lower-vta-gemm` | `vta.gemm`(N×N) → `vtaisa.*` 指令序列；有 `vta.layers` 时按层取逻辑基址，否则单层 `computeGemmLayout`。CASE 1（无溢出）：单步；Strategy-1/2/3/4（溢出，由 `{strategy=N}` 属性选择）：多步 LOAD/GEMM/STORE |
-| `VTASemaphoreDerive` | `--vta-semaphore-derive` | 在 `vtaisa.*` 序列上运行 4 计数器信号量算法（CMP↔LD↔ST），重新推导所有 `pop_prev/pop_next/push_prev/push_next` 依赖位，取代硬编码；对所有 GEMM 策略产生与黄金字节级一致的结果 |
+| `LowerVTAAlu` | `--lower-vta-alu` | `vta.alu`(M×16 memref) → `vtaisa.*` 指令序列；按行发射 ALU UOP 表 + `GEMM reset` + `LOAD ACC` + `LOAD UOP(alu)` + 主 `ALU insn` + M 条 `STORE` + NOP + `finish`。DRAM 布局通过 `computeAluLayout` 页对齐（顺序 ACC/OUT/UOP/INSN，无 INP/WGT）。ADD_IMM 16×16 字节级对齐上游黄金（24 insns + 17 uops）。 |
+| `VTASemaphoreDerive` | `--vta-semaphore-derive` | 在 `vtaisa.*` 序列上运行 4 计数器信号量算法（CMP↔LD↔ST），重新推导所有 `pop_prev/pop_next/push_prev/push_next` 依赖位，取代硬编码；对所有 GEMM/ALU 策略产生与黄金字节级一致的结果 |
 
 `vta-opt` 同时注册全部上游 dialect/pass（`-linalg-tile`、各 `*-bufferize`、`-canonicalize` 等），可直接跑完整中端管道。
 
@@ -223,7 +227,33 @@ scripts/make_golden_gemm.sh 32 48 16  # 任意 16 倍数 M K N → test/golden/m
 > [`docs/plans/spike-generalized-gemm-notes.md`](docs/plans/spike-generalized-gemm-notes.md)；
 > 矩形/更多块黄金用 `scripts/make_golden_gemm.sh <M> <K> <N>` 生成。
 
-### 7) FSIM 端到端验证
+### 8) ALU lowering（`vta.alu` → vtaisa 指令序列）
+
+```bash
+# 手写 vta.alu IR（ADD_IMM 16×16，M=16 行）
+cat > /tmp/alu16.mlir << 'EOF'
+func @main(%acc: memref<16x16xi32>) {
+  vta.alu ins(%acc : memref<16x16xi32>) {alu_opcode = 2 : i64, use_imm = true, imm = 3 : i64}
+  return
+}
+EOF
+
+# lower → vtaisa 序列
+~/mlir-vta-build/bin/vta-opt --lower-vta-alu /tmp/alu16.mlir -o /tmp/alu16_low.mlir
+
+# 发射二进制
+mkdir -p /tmp/alu_out
+~/mlir-vta-build/bin/vta-translate /tmp/alu16_low.mlir -o /tmp/alu_out
+
+# 字节级验收（24 insns + 17 uops）
+cmp /tmp/alu_out/instructions.bin test/golden/alu_add_imm_16x16/instructions.bin && echo "ALU INSN OK"
+cmp /tmp/alu_out/uop.bin          test/golden/alu_add_imm_16x16/uop.bin          && echo "ALU UOP OK"
+```
+
+> `alu_opcode`：0=MIN, 1=MAX, 2=ADD, 3=SHR, 4=MUL。`use_imm=true` 使用立即数 `imm`（ADD_IMM 的 shift bias）。
+> DRAM 布局（页对齐，无 INP/WGT）：ACC=0x40, OUT=0x80, UOP=0xc00（logical）。
+
+### 9) FSIM 端到端验证
 
 ```bash
 scripts/run_fsim.sh              # 阶段一：gemm16x16.mlir → FSIM

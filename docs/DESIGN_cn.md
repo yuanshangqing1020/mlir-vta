@@ -62,7 +62,7 @@ flowchart TD
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
-| **三** | 通用维度 GEMM（多块·CASE 1 无 overfit）：块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配** + **多层编译**（`-vta-dram-allocation` 跨层 base 递增、逐层独立工件）+ **Overfit Strategy-1/2/3/4 全部落地**（`vta.gemm {strategy=N}` 属性，各策略字节级对齐上游黄金）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048）字节级验收；后续：依赖信号量通用推导 pass、ALU lowering、真·层间串联（`fsim_nn`） | ✅ 完成（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4 全部落地）|
+| **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM 16×16 字节级验收）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收；后续：真·层间串联（`fsim_nn`）、MAX/SHR ALU 黄金验收 | ✅ 完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering 全部落地）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流
@@ -371,19 +371,26 @@ vta-opt matmul_tensor.mlir \
 - 新增**地址分配 pass**，复刻 `dram_allocation`：按 4 KiB 页对齐为 INP/WGT/ACC/OUT/UOP/INSN 排物理/逻辑地址，产出 `memory_addresses.csv`。
 - 用 `bufferization` 把 tensor 语义降到 memref，与 SRAM/DRAM 缓冲对应。
 
-### 10.2 阶段三：依赖信号量推导 pass（最难）
+### 10.2 阶段三：依赖信号量推导 pass ✅ 已完成（`--vta-semaphore-derive`）
 
-这是 Python 编译器里唯一没有现成 MLIR 能力直接覆盖的部分。设计草图：
-- 把 Load/Compute/Store 视作三阶段流水线，对每条低层指令访问的 SRAM 区间做依赖分析；
-- 维护四个方向的 token 队列（`LD->CMP`/`CMP->LD`/`CMP->ST`/`ST->CMP`），在成对的生产/消费指令上设置 `push_*`/`pop_*` 位；
-- 必要处插入 `y_size=x_size=0` 的 NOP 排空指令（对应阶段一硬编码序列里的 I8/I9）。
-- 可借助 MLIR async/token 建模，或实现为独立的 dataflow 分析 pass。
+`VTASemaphoreDerive.cpp` 实现完整的 4 计数器状态机（`CMP->LD / LD->CMP / CMP->ST / ST->CMP`）：
+- 按程序顺序遍历 `vtaisa.*` 序列，按角色（LoadInp/LoadWgt/LoadAcc/LoadUop/GemmReset/GemmMain/AluInsn/StoreOut/NopInp/NopUop）分类，对每条 op 重新推导 `pop_prev/pop_next/push_prev/push_next` 位；
+- 处理逐块 STORE 组（首块 pop_prev=1，末块 push_prev=1）；
+- 幂等：对已有依赖位的序列再次运行结果不变。
+- 对 CASE 1（16×16/32×32/矩形/3×3）及 Overfit Strategy-1/2/4 字节级验收通过。
 
 同时为低层 op 补 **verifier**，把 §5.1 的 `setBits` 断言提升为 IR 级字段范围校验（阶段二自动生成字段后最先受益）。
 
-### 10.3 阶段三：ALU lowering
+### 10.3 阶段三：ALU lowering ✅ 已完成
 
-高层 `vta.alu`（ReLU=MAX imm0、池化=ADD+SHR 等）→ `vtaisa.alu_insn` + `vtaisa.uop_table`。`vtaisa.alu_insn` / `packAlu` 已就绪，只缺 lowering 与测试覆盖。
+高层 `vta.alu`（ADD_IMM/MAX/SHR 等）→ `vtaisa.alu_insn` + `vtaisa.uop_table`。实现：
+
+- **`vta.alu` op**（`VTAOps.td`）：`ins(%acc : memref<[M,16]xi32>)` + `alu_opcode/use_imm/imm` 属性，verifier 要求 cols=16, opcode∈[0,4]。
+- **`computeAluLayout`**（`VTAGemmLayout.h`）：ACC/OUT/UOP/INSN 页对齐顺序（无 INP/WGT），逻辑基址 ACC=0x40, OUT=0x80, UOP=0xc00（M=16 时）。
+- **`--lower-vta-alu` pass**（`LowerVTAAlu.cpp`）：UOP 表（1+M 条）+ LOAD UOP reset + GEMM reset + LOAD ACC + LOAD UOP alu + ALU main + M×STORE + 2 NOP + FINISH，共 8+M 条指令。
+- **字节级验收**：ADD_IMM 16×16 产生 24 insns + 17 uops，对齐上游 `alu_16x16` 黄金（见 `test/golden/alu_add_imm_16x16/`）。
+
+MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待补黄金验收。
 
 ### 10.4 阶段四：`onnx-mlir` 前端
 
@@ -399,7 +406,7 @@ vta-opt matmul_tensor.mlir \
 | 依赖位用 CASE 1 固定位置模式 | 单 step 正确（对齐黄金）；非通用 4 计数器推导 | 后续增量：多 step 通用信号量 pass |
 | 地址分配内联在 lowering/发射器（`computeGemmLayout`）| 单层页对齐已字节对齐上游；尚无独立 allocation pass、不支持多层串联 | 后续增量：抽成独立 `dram-allocation` pass，支持多层/层间复用 |
 | 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 后续补 op verifier |
-| `alu_insn` 无 lowering/测试覆盖 | op 与发射器已实现但未被使用 | 后续 ALU lowering |
+| `vta.alu` MAX/SHR 黄金未验收 | `--lower-vta-alu` 已实现，ADD_IMM 验收通过；MAX/SHR 逻辑可用但无黄金 | 补充 maxpool_36x16 等黄金 |
 | 无 `lit`/CTest 装配 | 测试靠脚本 `cmp`/`grep` 手跑 | 可选：加最小 lit 配置 |
 
 ---
