@@ -4,20 +4,31 @@ include "mlir-vta/Dialect/VTA/VTADialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def VTA_GemmOp : VTA_Op<"gemm"> {
-  let summary = "single 16x16 block GEMM: acc += lhs * rhs (in-place on acc memref)";
+  let summary = "block GEMM: acc += lhs * rhs (in-place on acc memref), dims multiple of 16";
   let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc);
   let results = (outs);
   let assemblyFormat =
     "`ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)` "
     "`outs` `(` $acc `:` type($acc) `)` attr-dict";
   let verifier = [{
-    auto isBlk = [](::mlir::Value v) {
-      auto mt = v.getType().dyn_cast<::mlir::MemRefType>();
-      return mt && mt.getRank() == 2 && mt.getShape()[0] == 16 &&
-             mt.getShape()[1] == 16;
+    auto mt = [](::mlir::Value v) {
+      return v.getType().dyn_cast<::mlir::MemRefType>();
     };
-    if (!isBlk(lhs()) || !isBlk(rhs()) || !isBlk(acc()))
-      return emitOpError("phase-2 vta.gemm requires 16x16 memref operands");
+    auto lhsT = mt(lhs()), rhsT = mt(rhs()), accT = mt(acc());
+    if (!lhsT || !rhsT || !accT || lhsT.getRank() != 2 ||
+        rhsT.getRank() != 2 || accT.getRank() != 2)
+      return emitOpError("vta.gemm requires three 2-D memref operands");
+    int64_t m = lhsT.getShape()[0], k = lhsT.getShape()[1];
+    int64_t k2 = rhsT.getShape()[0], n = rhsT.getShape()[1];
+    int64_t am = accT.getShape()[0], an = accT.getShape()[1];
+    // Phase-3: each dimension must be a positive multiple of 16.
+    for (int64_t d : {m, k, n})
+      if (d <= 0 || d % 16 != 0)
+        return emitOpError("vta.gemm requires dimensions that are positive "
+                           "multiples of 16");
+    if (k2 != k || am != m || an != n)
+      return emitOpError("vta.gemm shape mismatch: expected lhs MxK, rhs KxN, "
+                         "acc MxN");
     return ::mlir::success();
   }];
 }
