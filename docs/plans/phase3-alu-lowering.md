@@ -269,5 +269,6 @@ uop[1+i] = (i, 0, 0)  i∈[0,M)  ← dst=row i, src=0, wgt=0
 
 ## 后续增量
 
-- MAX pool（opcode=1）、SHR（opcode=3）：与 ADD_IMM 结构相同，仅 `alu_opcode` 和 `use_imm/imm` 不同，同一 pass 可直接支持，需补充黄金验收。
-- 真·层间串联（增量 C）：依赖 `fsim_nn` + `dependency.csv`，推迟。
+- MAX pool（opcode=1，imm=0）：`cmp /tmp/max_out/{instructions,uop}.bin test/golden/alu_max_imm_16x16/` 两个 OK ✅
+- SHR（opcode=3，imm=2）：`cmp /tmp/shr_out/{instructions,uop}.bin test/golden/alu_shr_imm_16x16/` 两个 OK ✅
+- 真·层间串联（`fsim_nn`）：2×16×16 GEMM 串联，256/256 元素一致 ✅ 见 [`phase3-fsim-nn-2layer.md`](phase3-fsim-nn-2layer.md)。

@@ -62,7 +62,7 @@ flowchart TD
 |------|------|------|
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
-| **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM 16×16 字节级验收）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收；后续：真·层间串联（`fsim_nn`）、MAX/SHR ALU 黄金验收 | ✅ 完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering 全部落地）|
+| **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM/MAX_IMM/SHR_IMM 16×16 字节级验收）+ **真·层间串联**（`fsim_nn` 2×16×16 GEMM 串联，256/256 元素一致，`scripts/run_fsim_nn_2layer.sh`）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收 | ✅ 全部完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering + fsim_nn 层间串联）|
 | **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 规划中 |
 
 ### 2.2 阶段一已落地的数据流

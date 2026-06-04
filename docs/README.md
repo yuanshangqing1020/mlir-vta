@@ -12,7 +12,8 @@
 | [plans/phase3-overfit-strategy1.md](plans/phase3-overfit-strategy1.md) | 阶段三增量：Overfit strategy-1 多步调度（16×2064×16）✅ |
 | [plans/phase3-overfit-strategy234.md](plans/phase3-overfit-strategy234.md) | 阶段三增量：Overfit strategy-2/3/4 全部落地 ✅ |
 | [plans/phase3-multilayer-dram-allocation.md](plans/phase3-multilayer-dram-allocation.md) | 阶段三增量：多层 DRAM 地址分配（`-vta-dram-allocation`）✅ |
-| [plans/phase3-alu-lowering.md](plans/phase3-alu-lowering.md) | 阶段三增量：ALU lowering（`vta.alu` + `--lower-vta-alu`，ADD_IMM 字节级验收）✅ |
+| [plans/phase3-alu-lowering.md](plans/phase3-alu-lowering.md) | 阶段三增量：ALU lowering（`vta.alu` + `--lower-vta-alu`，ADD_IMM/MAX_IMM/SHR_IMM 字节级验收）✅ |
+| [plans/phase3-fsim-nn-2layer.md](plans/phase3-fsim-nn-2layer.md) | 阶段三增量：真·层间串联（`fsim_nn` 2×16×16 GEMM，256/256 一致）✅ |
 | [plans/spike-bufferize-notes.md](plans/spike-bufferize-notes.md) | 阶段二 Task 0：tile + bufferize 管道 spike 记录 |
 | [plans/spike-generalized-gemm-notes.md](plans/spike-generalized-gemm-notes.md) | 阶段三 Task 0：32×32 黄金解码 spike 记录 |
 

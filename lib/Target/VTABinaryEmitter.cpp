@@ -4,6 +4,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/OpDefinition.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
@@ -143,9 +144,12 @@ static void appendUop(std::vector<uint8_t> &buf, uint32_t u) {
     buf.push_back(static_cast<uint8_t>((u >> (8 * i)) & 0xFF));
 }
 
-static LogicalResult writeFile(StringRef path, const std::vector<uint8_t> &buf) {
+static LogicalResult writeFile(StringRef path, const std::vector<uint8_t> &buf,
+                               bool append = false) {
   std::error_code ec;
-  llvm::raw_fd_ostream os(path, ec);
+  llvm::sys::fs::OpenFlags flags =
+      append ? llvm::sys::fs::OF_Append : llvm::sys::fs::OF_None;
+  llvm::raw_fd_ostream os(path, ec, flags);
   if (ec) {
     llvm::errs() << "vta-translate: cannot open " << path << ": "
                  << ec.message() << "\n";
@@ -205,8 +209,12 @@ LogicalResult mlir::vta::emitBinary(ModuleOp module, StringRef outDir) {
         layerIdx < layerNames.size() ? layerNames[layerIdx] : std::string();
     std::string insnPath = (outDir + "/instructions" + name + ".bin").str();
     std::string uopPath = (outDir + "/uop" + name + ".bin").str();
-    if (failed(writeFile(insnPath, insnBuf)) ||
-        failed(writeFile(uopPath, uopBuf)))
+    // In single-layer mode (no vta.layers), multiple FINISH boundaries occur
+    // when lower-vta-gemm + lower-vta-alu are chained in a single func. Append
+    // the bytes so instructions.bin/uop.bin contain the full concatenated stream.
+    const bool append = !layersAttr && (layerIdx > 0);
+    if (failed(writeFile(insnPath, insnBuf, append)) ||
+        failed(writeFile(uopPath, uopBuf, append)))
       flushResult = failure();
     insnBuf.clear();
     uopBuf.clear();
