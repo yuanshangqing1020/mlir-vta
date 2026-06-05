@@ -1,0 +1,6 @@
+Matrix (or Block Size),Nb rows,Nb columns,Is it square?
+BS,16,16,True
+A,32,32,True
+X,32,16,False
+Y,0,0,True
+C,32,16,True
