@@ -4,6 +4,7 @@
 #include "mlir-vta/Dialect/VTAISA/VTAISADialect.h"
 #include "mlir-vta/Dialect/VTAISA/VTAISAOps.h"
 #include "mlir-vta/VTAGemmLayout.h"
+#include "mlir-vta/VTALayerUtils.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -37,8 +38,9 @@ struct LowerVTAGemmPass
 
     for (auto it : llvm::enumerate(targets)) {
       vta::GemmOp g = it.value();
-      DictionaryAttr layerDict;
-      if (layersAttr && it.index() < layersAttr.size())
+      DictionaryAttr layerDict =
+          vta::findLayerDict(module, g.name().getValueOr(""));
+      if (!layerDict && layersAttr && it.index() < layersAttr.size())
         layerDict = layersAttr[it.index()].dyn_cast<DictionaryAttr>();
       auto lhsT = g.lhs().getType().dyn_cast<MemRefType>();
       auto rhsT = g.rhs().getType().dyn_cast<MemRefType>();
@@ -97,9 +99,19 @@ struct LowerVTAGemmPass
       SmallVector<int64_t> uopDst, uopSrc, uopWgt;
       uopDst.push_back(0); uopSrc.push_back(0); uopWgt.push_back(0); // reset
 
-      const bool useCase1 = !isOverfit && strategyId == 1 && !expandBias;
+      const int64_t mulConst = g.mul_constant();
+      const bool isMulConst = mulConst >= 0;
+      const bool useCase1 =
+          !isOverfit && strategyId == 1 && !expandBias && !isMulConst;
 
-      if (useCase1) {
+      if (isMulConst && strategyId == 1) {
+        // MulConstant: C[a] = A[a] * scalar (WGT block 0); one uop per A block.
+        for (int64_t a = 0; a < nbA; ++a) {
+          uopDst.push_back(a * 16);
+          uopSrc.push_back(a * 16);
+          uopWgt.push_back(0);
+        }
+      } else if (useCase1) {
         // CASE-1: global-index UOP entries.
         for (int64_t a = 0; a < nbA; ++a) {
           int64_t i = a / Kb, k = a % Kb;
@@ -282,7 +294,39 @@ struct LowerVTAGemmPass
                                    /*loop_out=*/1, /*loop_in=*/16,
                                    /*dst_factor_out=*/16, /*dst_factor_in=*/1);
 
-      if (!isOverfit && strategyId == 1 && !expandBias) {
+      if (!isOverfit && strategyId == 1 && isMulConst) {
+        // MulConstant CASE-1: INP + WGT only (no ACC load), matches matmulConst golden.
+        b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP, /*pop_prev=*/false,
+                                 /*pop_next=*/true, false, false, /*sram_base=*/0,
+                                 /*dram_base=*/kInpBase, /*y_size=*/nbA,
+                                 /*x_size=*/16, /*x_stride=*/16);
+        b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT, false, false, false,
+                                 /*push_next=*/true, /*sram_base=*/0,
+                                 /*dram_base=*/kWgtBase, /*y_size=*/nbB,
+                                 /*x_size=*/1, /*x_stride=*/1);
+        b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC, /*pop_prev=*/true,
+                                 /*pop_next=*/false, false, false, /*sram_base=*/0,
+                                 /*dram_base=*/kAccBase, /*y_size=*/nbA,
+                                 /*x_size=*/16, /*x_stride=*/16);
+        b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, false, false, false,
+                                 false, /*sram_base=*/0,
+                                 /*dram_base=*/kUopBase + 1, /*y_size=*/1,
+                                 /*x_size=*/G, /*x_stride=*/G);
+        b.create<vtaisa::GemmInsnOp>(loc, /*pop_prev=*/false, /*pop_next=*/false,
+                                     /*push_prev=*/true, /*push_next=*/true,
+                                     /*reset=*/false, /*uop_bgn=*/0, /*uop_end=*/G,
+                                     /*loop_out=*/1, /*loop_in=*/16,
+                                     /*dst_factor_out=*/0, /*dst_factor_in=*/1,
+                                     /*src_factor_out=*/0, /*src_factor_in=*/1);
+        for (int64_t blk = 0; blk < nbC; ++blk) {
+          bool popPrev = (blk == 0);
+          bool pushPrev = (blk == nbC - 1);
+          b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT, popPrev, false,
+                                    pushPrev, false, /*sram_base=*/blk * 16,
+                                    /*dram_base=*/kOutBase + blk * 16,
+                                    /*y_size=*/1, /*x_size=*/16, /*x_stride=*/16);
+        }
+      } else if (!isOverfit && strategyId == 1 && !expandBias) {
         // CASE-1: single-step schedule. All blocks fit on-chip simultaneously.
         // Merged data loads: y_size = number of blocks (block logical addresses
         // are equidistant). INP/ACC stride 16 (16 vectors/block), WGT stride 1.
@@ -617,6 +661,9 @@ void mlir::vta::registerVTAPasses() {
   PassRegistration<LowerVTAGemmPass>();
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
     return mlir::vta::createLowerVTAAluPass();
+  });
+  ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
+    return mlir::vta::createLowerVTAMaxPoolPass();
   });
   ::mlir::registerPass([]() -> std::unique_ptr<Pass> {
     return mlir::vta::createConvertLinalgToVTAPass();

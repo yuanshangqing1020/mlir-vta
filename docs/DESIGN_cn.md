@@ -63,7 +63,7 @@ flowchart TD
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
 | **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM/MAX_IMM/SHR_IMM 16×16 字节级验收）+ **真·层间串联**（`fsim_nn` 2×16×16 GEMM 串联，256/256 元素一致，`scripts/run_fsim_nn_2layer.sh`）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收 | ✅ 全部完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering + fsim_nn 层间串联）|
-| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A ✅；增量 B ✅；增量 C ✅；增量 E 进行中（ReLU 16×16 MAX_IMM 字节级 + FSIM ✅） |
+| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A/B/C ✅；增量 E ✅（ReLU / MaxPool / QLinearMul / Conv+Relu fsim_nn）；增量 D/F/G 待做 |
 
 ### 2.2 阶段一已落地的数据流
 
@@ -412,14 +412,19 @@ MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待
 - **`--multi`** + **`--vta-dram-allocation`** + 逐层 `vta-translate --layer`。
 - **`scripts/run_onnx_two_qconv.sh`**、`gen_two_qlinearconv_small.py`（16×16→256×144×16×2 层）；`dependency.csv` + `fsim_nn` 产出 `final_output.bin`（4096 B）。
 
-#### 增量 E（进行中）：Relu / MaxPool / QLinearMul
+#### 增量 E ✅：Relu / MaxPool / QLinearMul / Conv+Relu
 
 - **ReLU 16×16 ✅**：`scripts/onnx_relu_bridge.py` → `vta.alu` MAX_IMM；`run_onnx_relu.sh` + `test/golden/relu_16x16/` 字节级 INSN/UOP + FSIM 与 upstream 一致。
-- 待做：Conv+Relu 多层 fsim_nn、MaxPool、QLinearMul。
+- **MaxPool 36×16 ✅**：`vta.maxpool` + `--lower-vta-maxpool`；`onnx_maxpool_bridge.py` / `run_onnx_maxpool.sh` / `test/golden/maxpool_36x16/`（33 UOP / 18 INSN 字节级 + FSIM）。
+- **QLinearMul（MulConstant）✅**：`vta.gemm {mul_constant=N}` + `--lower-vta-gemm` 专用路径；`onnx_qlinearmul_bridge.py` / `run_onnx_qlinearmul.sh` / `test/golden/matmulConst_16x16/`（INSN/UOP 字节级；FSIM 偶发 hang，以字节级为准）。
+- **Conv+Relu 两层 fsim_nn ✅**：`onnx_conv_relu_bridge.py` + `run_onnx_conv_relu.sh`；`--vta-dram-allocation --lower-vta-gemm --lower-vta-alu` 混合层；`dependency.csv` + `fsim_nn` 产出 `final_output.bin`（75 B，`conv_relu_debug.onnx`）。
+- **多层 DRAM 扩展 ✅**：`-vta-dram-allocation` 按程序顺序遍历 `vta.gemm` / `vta.alu` / `vta.maxpool`；`VTALayerUtils.h::findLayerDict` 按层名查 `vta.layers`。
 
-#### 待做（增量 D–G）
+#### 待做（增量 D / F / G）
 
-- onnx-mlir C++ 前端；MaxPool/Relu/Mul；CPU 算子；LeNet-5 整网。
+- **D**：onnx-mlir C++ 前端（替换 Python 桥接）。
+- **F**：CPU 算子（QLinearAdd / Concat 等）+ `dependency.csv` 混合调度。
+- **G**：LeNet-5 整网 `fsim_nn` 端到端。
 
 ---
 
@@ -431,7 +436,8 @@ MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待
 | 依赖位用 CASE 1 固定位置模式 | 单 step 正确（对齐黄金）；非通用 4 计数器推导 | 后续增量：多 step 通用信号量 pass |
 | 地址分配内联在 lowering/发射器（`computeGemmLayout`）| 单层页对齐已字节对齐上游；尚无独立 allocation pass、不支持多层串联 | 后续增量：抽成独立 `dram-allocation` pass，支持多层/层间复用 |
 | 字段范围仅 `assert` 校验 | debug 构建捕获越界，无 IR verifier | 后续补 op verifier |
-| `vta.alu` MAX/SHR 黄金未验收 | `--lower-vta-alu` 已实现，ADD_IMM 验收通过；MAX/SHR 逻辑可用但无黄金 | 补充 maxpool_36x16 等黄金 |
+| `vta.alu` MAX/SHR 黄金未验收 | `--lower-vta-alu` 已实现；ADD_IMM/MAX_IMM(ReLU)/MaxPool vector-MAX 均有黄金 | MaxPool 36×16、ReLU 16×16 已验收 |
+| `fsim_single_layer` 偶发 hang | QLinearMul 验收脚本中 FSIM 可能长时间无响应 | 字节级 INSN/UOP 为准；必要时 kill 卡死进程 |
 | 无 `lit`/CTest 装配 | 测试靠脚本 `cmp`/`grep` 手跑 | 可选：加最小 lit 配置 |
 
 ---
@@ -454,6 +460,9 @@ MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待
 | `tools/vta-opt/` `tools/vta-translate/` | 命令行工具 |
 | `test/` | round-trip、字节级用例、黄金 fixtures |
 | `scripts/make_golden.sh` `scripts/run_fsim.sh` `scripts/run_fsim_linalg.sh` | 黄金参考生成、FSIM 端到端、linalg 入口端到端验收 |
+| `lib/Transforms/LowerVTAMaxPool.cpp` | `vta.maxpool` → `vtaisa.*`（36×16 2×2 MAX 模式） |
+| `include/mlir-vta/VTALayerUtils.h` | 按层名查 `vta.layers` 字典 |
+| `scripts/run_onnx_*.sh` | 阶段四 ONNX 桥接端到端验收（qconv / relu / maxpool / qlinearmul / conv_relu） |
 | `docs/specs/phase1-gemm-design.md` | 阶段一（GEMM 最小闭环）设计规格 |
 | `docs/specs/phase2-linalg-entry-design.md` | 阶段二（linalg 入口）设计规格 |
 | `docs/plans/phase1-gemm.md` | 阶段一实施计划（含黄金 hex/CSV 全文） |

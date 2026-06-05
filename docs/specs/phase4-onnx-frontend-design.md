@@ -1,6 +1,6 @@
 # MLIR-VTA 阶段四设计规格 · ONNX 前端与整网端到端
 
-> **状态：** 增量 A 已落地（2026-06）。单层 `QLinearConv` Python 桥接 → MLIR → 二进制 + FSIM 验收通过。
+> **状态：** 增量 A–C/E 已落地（2026-06）。增量 E：ReLU / MaxPool / QLinearMul / Conv+Relu fsim_nn 字节级 + 整网串联验收通过。
 > 长期目标：接入 `onnx-mlir`，替换 `vta_backend.py` + `main_vta_compiler.py` 的 Python 两阶段工具链。
 
 ---
@@ -53,11 +53,11 @@ flowchart TD
 |--------|------|------------|
 | **A. ONNX 解析桥接** | 读 qONNX，Im2Col/ker2col，写 padded raw bin + MLIR 入口 | ✅ 增量 A |
 | **B. dependency.csv 发射** | 按层元数据写整网调度 CSV | ✅ 增量 A |
-| **C. 非 16 倍数行维** | 上游 A 矩阵仅列 padding（如 25×32）；mlir 现要求 M%16==0 | ⏳ 待做（增量 B） |
+| **C. 非 16 倍数行维** | 上游 A 矩阵仅列 padding（如 25×32）；col-pad + expand_bias 已落地 | ✅ 增量 B |
 | **D. onnx-mlir 接入** | C++ 前端，QLinearConv → linalg | ⏳ 待做 |
-| **E. MaxPool / Relu / QLinearMul** | → `vta.alu` 或 GEMM 常量乘 | ⏳ 待做 |
+| **E. MaxPool / Relu / QLinearMul** | → `vta.alu` / `vta.maxpool` / `vta.gemm{mul_constant}` | ✅ 增量 E |
 | **F. CPU 回退算子** | QLinearAdd / Concat → dependency.csv `processor=cpu` | ⏳ 待做 |
-| **G. 量化 rescale** | FSIM 内 scale/offset 与 CSV 字段对齐 | ⏳ 待做（首层可 scale=1 简化） |
+| **G. 量化 rescale** | FSIM 内 scale/offset 与 CSV 字段对齐 | 🔄 部分（Conv 层已接 scale；整网待做） |
 | **H. LeNet-5 整网** | 多层 ONNX → fsim_nn 端到端 | ⏳ 待做 |
 
 ---

@@ -16,6 +16,6 @@
 | [plans/phase3-fsim-nn-2layer.md](plans/phase3-fsim-nn-2layer.md) | 阶段三增量：真·层间串联（`fsim_nn` 2×16×16 GEMM，256/256 一致）✅ |
 | [plans/spike-bufferize-notes.md](plans/spike-bufferize-notes.md) | 阶段二 Task 0：tile + bufferize 管道 spike 记录 |
 | [specs/phase4-onnx-frontend-design.md](specs/phase4-onnx-frontend-design.md) | 阶段四（ONNX 前端）设计规格 |
-| [plans/phase4-onnx-frontend.md](plans/phase4-onnx-frontend.md) | 阶段四实施计划（增量 A：单层 QLinearConv）🔄 |
+| [plans/phase4-onnx-frontend.md](plans/phase4-onnx-frontend.md) | 阶段四实施计划（增量 A–C/E ✅；D/F/G 待做） |
 
 构建与命令行用法见仓库根目录 [README.md](../README.md)。

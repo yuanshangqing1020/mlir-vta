@@ -35,6 +35,7 @@
 #include "mlir-vta/Dialect/VTAISA/VTAISADialect.h"
 #include "mlir-vta/Dialect/VTAISA/VTAISAOps.h"
 #include "mlir-vta/VTAGemmLayout.h"
+#include "mlir-vta/VTALayerUtils.h"
 
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -74,7 +75,22 @@ struct LowerVTAAluPass
       const int64_t nbBlocks = (nbVec + 15) / 16; // ceil(M/16) 16×16 blocks
 
       // Compute DRAM layout.
-      auto L = vta::computeAluLayout(nbVec, G);
+      DictionaryAttr layerDict =
+          vta::findLayerDict(module, op.name().getValueOr(""));
+      int64_t kAccBase, kOutBase, kUopBase;
+      if (layerDict) {
+        auto getI = [&](StringRef key) {
+          return layerDict.getAs<IntegerAttr>(key).getInt();
+        };
+        kAccBase = getI("acc_log");
+        kOutBase = getI("out_log");
+        kUopBase = getI("uop_log");
+      } else {
+        auto L = vta::computeAluLayout(nbVec, G);
+        kAccBase = L.accLogical;
+        kOutBase = L.outLogical;
+        kUopBase = L.uopLogical;
+      }
 
       OpBuilder b(op);
       Location loc = op.getLoc();
@@ -100,7 +116,7 @@ struct LowerVTAAluPass
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
           /*pop_prev=*/false, /*pop_next=*/false,
           /*push_prev=*/false, /*push_next=*/false,
-          /*sram_base=*/0, /*dram_base=*/L.uopLogical,
+          /*sram_base=*/0, /*dram_base=*/kUopBase,
           /*y_size=*/1, /*x_size=*/1, /*x_stride=*/1);
 
       // ---------------------------------------------------------------
@@ -124,7 +140,7 @@ struct LowerVTAAluPass
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC,
           /*pop_prev=*/false, /*pop_next=*/false,
           /*push_prev=*/false, /*push_next=*/false,
-          /*sram_base=*/0, /*dram_base=*/L.accLogical,
+          /*sram_base=*/0, /*dram_base=*/kAccBase,
           /*y_size=*/nbBlocks, /*x_size=*/16, /*x_stride=*/16);
 
       // ---------------------------------------------------------------
@@ -133,7 +149,7 @@ struct LowerVTAAluPass
       b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
           /*pop_prev=*/false, /*pop_next=*/false,
           /*push_prev=*/false, /*push_next=*/false,
-          /*sram_base=*/0, /*dram_base=*/L.uopLogical + 1,
+          /*sram_base=*/0, /*dram_base=*/kUopBase + 1,
           /*y_size=*/1, /*x_size=*/G, /*x_stride=*/G);
 
       // ---------------------------------------------------------------
@@ -162,7 +178,7 @@ struct LowerVTAAluPass
         b.create<vtaisa::StoreOp>(loc, vtaisa::BufferId::OUT,
             /*pop_prev=*/isFirst, /*pop_next=*/false,
             /*push_prev=*/isLast, /*push_next=*/false,
-            /*sram_base=*/i, /*dram_base=*/L.outLogical + i,
+            /*sram_base=*/i, /*dram_base=*/kOutBase + i,
             /*y_size=*/1, /*x_size=*/1, /*x_stride=*/1);
       }
 

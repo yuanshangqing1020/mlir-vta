@@ -12,7 +12,8 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
   let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc,
                        OptionalAttr<StrAttr>:$name,
                        DefaultValuedAttr<I64Attr, "1">:$strategy,
-                       DefaultValuedAttr<BoolAttr, "false">:$expand_bias);
+                       DefaultValuedAttr<BoolAttr, "false">:$expand_bias,
+                       DefaultValuedAttr<I64Attr, "-1">:$mul_constant);
   let results = (outs);
   let assemblyFormat =
     "`ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)` "
@@ -75,6 +76,23 @@ def VTA_AluOp : VTA_Op<"alu"> {
     int64_t op = alu_opcode();
     if (op < 0 || op > 4)
       return emitOpError("vta.alu alu_opcode must be in [0,4], got ") << op;
+    return ::mlir::success();
+  }];
+}
+
+def VTA_MaxPoolOp : VTA_Op<"maxpool"> {
+  let summary = "2x2 maxpool on acc memref [M,16] (increment E: 36x16 golden pattern)";
+  let arguments = (ins AnyMemRef:$acc, OptionalAttr<StrAttr>:$name);
+  let results = (outs);
+  let assemblyFormat = "`ins` `(` $acc `:` type($acc) `)` attr-dict";
+  let verifier = [{
+    auto accT = acc().getType().dyn_cast<::mlir::MemRefType>();
+    if (!accT || accT.getRank() != 2)
+      return emitOpError("vta.maxpool requires a 2-D memref operand");
+    int64_t rows = accT.getShape()[0];
+    int64_t cols = accT.getShape()[1];
+    if (rows <= 0 || cols != 16)
+      return emitOpError("vta.maxpool acc memref must have shape [M, 16]");
     return ::mlir::success();
   }];
 }
