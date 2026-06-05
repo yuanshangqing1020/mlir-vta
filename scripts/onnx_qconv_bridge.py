@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Bridge a single-layer QLinearConv ONNX model to padded GEMM MLIR + raw bins.
+"""Bridge QLinearConv ONNX model(s) to GEMM MLIR + raw bins.
 
-Uses the `onnx` package only (no onnxruntime). Padding rules follow
-standalone-vta data_definition.matrix_padding; rows are additionally
-padded to 16-multiples for mlir-vta vta.gemm verifier (increment A).
+Uses the `onnx` package only. Supports:
+  --layout col-pad   : upstream-style column padding (increment B, M may be non-16)
+  --layout square-pad: row+col pad to 16-multiples (increment A legacy)
+  --multi            : emit all QLinearConv nodes in one func (increment C)
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import onnx
@@ -37,7 +38,6 @@ def matrix_padding(
     pad_rows: bool = True,
     block: int = BLOCK,
 ) -> np.ndarray:
-    """Pad matrix per upstream data_definition.py (+ optional row pad for MLIR)."""
     m_row, n_col = matrix.shape
     if is_weight or (is_square and pad_rows):
         target_rows = _ceil_block(m_row, block)
@@ -58,7 +58,6 @@ def im2row(
     padding: Tuple[int, int, int, int],
     dtype=np.int8,
 ) -> np.ndarray:
-    """NCHW batch=1 im2row → (mh*mw, nc*fh*fw)."""
     kh, kw = kernel_size
     sh, sw = stride
     pt, pl, pb, pr = padding
@@ -83,56 +82,91 @@ def im2row(
     return out
 
 
-def parse_qlinearconv(onnx_path: Path) -> Dict[str, Any]:
-    model = onnx.load(str(onnx_path))
+def parse_qlinearconv_node(model: onnx.ModelProto, node) -> Dict[str, Any]:
     graph = model.graph
-    conv = next(n for n in graph.node if n.op_type == "QLinearConv")
 
     def _scalar(name: str):
         init = next(t for t in graph.initializer if t.name == name)
         arr = numpy_helper.to_array(init)
         return arr.item() if arr.ndim == 0 else arr
 
-    w_init = next(t for t in graph.initializer if t.name == "W")
+    w_name = node.input[3]
+    w_init = next(t for t in graph.initializer if t.name == w_name)
     w = numpy_helper.to_array(w_init).astype(np.int8)
+    b_name = node.input[8]
     b = numpy_helper.to_array(
-        next(t for t in graph.initializer if t.name == "B")
+        next(t for t in graph.initializer if t.name == b_name)
     ).astype(np.int32)
 
-    attrs = {a.name: onnx.helper.get_attribute_value(a) for a in conv.attribute}
+    attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
     pads = list(attrs.get("pads", [0, 0, 0, 0]))
     strides = list(attrs.get("strides", [1, 1]))
     kernel = list(attrs.get("kernel_shape", [3, 3]))
 
-    x_info = next(vi for vi in graph.input if vi.name == "X")
-    y_info = next(vi for vi in graph.output if vi.name == "Y")
+    x_name = node.input[0]
+    y_name = node.output[0]
+
+    def _tensor_info(name: str):
+        for src in (graph.input, graph.output, graph.value_info):
+            for vi in src:
+                if vi.name == name:
+                    return vi
+        return None
+
+    x_info = _tensor_info(x_name)
+    if x_info is None:
+        raise KeyError(f"tensor {x_name!r} not in graph inputs/outputs/value_info")
     _, nc, nh, nw = [d.dim_value for d in x_info.type.tensor_type.shape.dim]
-    _, mc, mh, mw = [d.dim_value for d in y_info.type.tensor_type.shape.dim]
+
+    y_info = _tensor_info(y_name)
+    if y_info is None:
+        kh, kw = kernel[0], kernel[1]
+        sh, sw = strides[0], strides[1]
+        pt, pl, pb, pr = pads[0], pads[1], pads[2], pads[3]
+        mh = (nh + pt + pb - kh) // sh + 1
+        mw = (nw + pl + pr - kw) // sw + 1
+        mc = w.shape[0]
+        output_shape = (1, mc, mh, mw)
+    else:
+        output_shape = tuple(d.dim_value for d in y_info.type.tensor_type.shape.dim)
+    _, mc, mh, mw = output_shape
+
+    x_scale = node.input[1]
+    x_zp = node.input[2]
+    w_scale = node.input[4]
+    w_zp = node.input[5]
+    y_scale = node.input[6]
+    y_zp = node.input[7]
 
     return {
-        "name": conv.name or "QLinearConv1",
+        "name": node.name or node.output[0].replace("/", "_"),
         "input_shape": (1, nc, nh, nw),
-        "output_shape": (1, mc, mh, mw),
+        "output_shape": output_shape,
         "kernel": tuple(kernel),
         "stride": tuple(strides),
         "padding": (pads[0], pads[1], pads[2], pads[3]),
         "weight": w,
         "bias": b,
-        "offsetA": int(_scalar("x_zp")),
-        "scaleA": float(_scalar("x_scale")),
-        "offsetB": int(_scalar("w_zp")),
-        "scaleB": float(_scalar("w_scale")),
-        "offsetC": int(_scalar("y_zp")),
-        "scaleC": float(_scalar("y_scale")),
+        "offsetA": int(_scalar(x_zp)),
+        "scaleA": float(_scalar(x_scale)),
+        "offsetB": int(_scalar(w_zp)),
+        "scaleB": float(_scalar(w_scale)),
+        "offsetC": int(_scalar(y_zp)),
+        "scaleC": float(_scalar(y_scale)),
     }
 
 
-def build_layer(
-    onnx_path: Path,
+def list_qlinearconv_nodes(onnx_path: Path) -> List:
+    model = onnx.load(str(onnx_path))
+    return [n for n in model.graph.node if n.op_type == "QLinearConv"], model
+
+
+def gemm_from_info(
+    info: Dict[str, Any],
+    x_nchw: np.ndarray,
+    layout: str,
     out_dir: Path,
-    seed: int = 42,
 ) -> Dict[str, Any]:
-    info = parse_qlinearconv(onnx_path)
     name = info["name"]
     nc, nh, nw = info["input_shape"][1:]
     mc, mh, mw = info["output_shape"][1:]
@@ -141,64 +175,50 @@ def build_layer(
     ph = (info["padding"][0], info["padding"][2])
     pw = (info["padding"][1], info["padding"][3])
 
-    (ah, aw), (bh, bw), (ch, cw) = TM.im2row_matrix_dimension(
-        nc=nc,
-        nh=nh,
-        nw=nw,
-        mc=mc,
-        mh=mh,
-        mw=mw,
-        fh=fh,
-        fw=fw,
-        sh=sh,
-        sw=sw,
-        ph=ph,
-        pw=pw,
+    (ah, aw), (bh, bw), (_, _) = TM.im2row_matrix_dimension(
+        nc=nc, nh=nh, nw=nw, mc=mc, mh=mh, mw=mw,
+        fh=fh, fw=fw, sh=sh, sw=sw, ph=ph, pw=pw,
     )
-    assert ah == ch and aw == bh and bw == mc
 
-    np.random.seed(seed)
-    x_nchw = np.random.randint(-128, 127, size=(1, nc, nh, nw), dtype=np.int8)
-    a_raw = im2row(
-        x_nchw,
-        (fh, fw),
-        (sh, sw),
-        info["padding"],
-        dtype=np.int32,
-    )
+    a_raw = im2row(x_nchw, (fh, fw), (sh, sw), info["padding"], dtype=np.int32)
     wgt = info["weight"]
     if info["offsetB"] != 0:
         wgt = wgt - info["offsetB"]
     b_raw = SD.ker2col(wgt, dtype=np.int32)
     bias = info["bias"].reshape(1, -1).astype(np.int32)
-    acc_raw = np.tile(bias, (ah, 1))
 
-    a_pad = matrix_padding(a_raw, is_square=False, pad_rows=True)
+    col_pad = layout == "col-pad"
+    a_pad = matrix_padding(a_raw, is_square=False, pad_rows=not col_pad)
     b_pad = matrix_padding(b_raw, is_weight=True, pad_rows=True)
-    acc_pad = matrix_padding(acc_raw, is_weight=True, pad_rows=True)
+    if col_pad:
+        acc_pad = matrix_padding(bias, is_weight=False, is_square=False, pad_rows=False)
+        expand_bias = True
+    else:
+        acc_full = np.tile(bias, (ah, 1))
+        acc_pad = matrix_padding(acc_full, is_weight=True, pad_rows=True)
+        expand_bias = False
 
     m, k, n = a_pad.shape[0], a_pad.shape[1], b_pad.shape[1]
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    raw_in = out_dir / f"input_{m}x{k}.bin"
-    raw_wgt = out_dir / f"weight_{k}x{n}.bin"
-    raw_acc = out_dir / f"accumulator_{m}x{n}.bin"
+    raw_in = out_dir / f"input_{name}_{m}x{k}.bin"
+    raw_wgt = out_dir / f"weight_{name}_{k}x{n}.bin"
+    raw_acc = out_dir / f"accumulator_{name}_{acc_pad.shape[0]}x{acc_pad.shape[1]}.bin"
     a_pad.astype(np.int32).tofile(raw_in)
     b_pad.astype(np.int32).tofile(raw_wgt)
     acc_pad.astype(np.int32).tofile(raw_acc)
 
-    mlir_path = out_dir / "qlinearconv_padded.mlir"
-    mlir_text = f"""// Padded QLinearConv GEMM (increment A): {ah}x{aw} x {aw}x{bw} -> {ah}x{bw}
-// mlir dims {m}x{k}x{n} (rows padded to 16-multiple for vta.gemm verifier)
-func @main(%lhs: memref<{m}x{k}xi32>, %rhs: memref<{k}x{n}xi32>, %acc: memref<{m}x{n}xi32>) {{
-  vta.gemm ins(%lhs, %rhs : memref<{m}x{k}xi32>, memref<{k}x{n}xi32>)
-           outs(%acc : memref<{m}x{n}xi32>) {{name = "{name}", strategy = 2 : i64}}
-  return
-}}
-"""
-    mlir_path.write_text(mlir_text, encoding="utf-8")
+    expand_attr = ", expand_bias = true" if expand_bias else ""
+    gemm_mlir = (
+        f"  vta.gemm ins(%lhs_{name}, %rhs_{name} : memref<{m}x{k}xi32>, "
+        f"memref<{k}x{n}xi32>)\n"
+        f"           outs(%acc_{name} : memref<{m}x{n}xi32>) "
+        f"{{name = \"{name}\", strategy = 2 : i64{expand_attr}}}\n"
+    )
+    func_args = (
+        f"%lhs_{name}: memref<{m}x{k}xi32>, %rhs_{name}: memref<{k}x{n}xi32>, "
+        f"%acc_{name}: memref<{m}x{n}xi32>"
+    )
 
-    meta = {
+    node_info = {
         "name": name,
         "processor": "vta",
         "reshape": "im2row",
@@ -216,58 +236,122 @@ func @main(%lhs: memref<{m}x{k}xi32>, %rhs: memref<{k}x{n}xi32>, %acc: memref<{m
         "output_shape": info["output_shape"],
         "parent_layers": ["image"],
         "raw_dims": {"M": m, "K": k, "N": n, "ah": ah, "aw": aw},
+        "expand_bias": expand_bias,
+        "acc_rows": acc_pad.shape[0],
         "paths": {
             "input": str(raw_in),
             "weight": str(raw_wgt),
             "accumulator": str(raw_acc),
-            "mlir": str(mlir_path),
         },
-        "input_nchw_int8": x_nchw,
-        "a_raw": a_raw,
-        "b_raw": b_raw,
-        "acc_raw": acc_raw,
+        "func_args": func_args,
+        "gemm_mlir": gemm_mlir,
     }
+    return node_info
+
+
+def build_model(
+    onnx_path: Path,
+    out_dir: Path,
+    seed: int = 42,
+    layout: str = "col-pad",
+    multi: bool = False,
+    zero_input: bool = False,
+) -> Dict[str, Any]:
+    nodes, model = list_qlinearconv_nodes(onnx_path)
+    if not nodes:
+        raise SystemExit(f"No QLinearConv in {onnx_path}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    np.random.seed(seed)
+    layers: List[Dict[str, Any]] = []
+    parent_map = {"image": None}
+
+    for idx, node in enumerate(nodes):
+        info = parse_qlinearconv_node(model, node)
+        if idx == 0:
+            nc, nh, nw = info["input_shape"][1:]
+            if zero_input:
+                x_nchw = np.zeros((1, nc, nh, nw), dtype=np.int8)
+            else:
+                x_nchw = np.random.randint(-128, 127, size=(1, nc, nh, nw), dtype=np.int8)
+        else:
+            # Placeholder int8 tensor for layer>0 (fsim_nn chains real outputs).
+            nc, nh, nw = info["input_shape"][1:]
+            x_nchw = np.zeros((1, nc, nh, nw), dtype=np.int8)
+
+        meta = gemm_from_info(info, x_nchw, layout, out_dir)
+        if idx == 0:
+            meta["parent_layers"] = ["image"]
+        else:
+            prev = layers[-1]["name"]
+            meta["parent_layers"] = [prev]
+        layers.append(meta)
+        x_nchw.tofile(out_dir / f"input_nchw_{meta['name']}.bin")
+
+    if multi and len(layers) > 1:
+        args = ", ".join(l["func_args"] for l in layers)
+        body = "".join(l["gemm_mlir"] for l in layers)
+        mlir_text = f"func @main({args}) {{\n{body}  return\n}}\n"
+        mlir_name = "qlinearconv_multi.mlir"
+    else:
+        l = layers[0]
+        mlir_text = (
+            f"func @main({l['func_args']}) {{\n{l['gemm_mlir']}  return\n}}\n"
+        )
+        mlir_name = (
+            "qlinearconv_colpad.mlir" if layout == "col-pad" else "qlinearconv_padded.mlir"
+        )
+
+    mlir_path = out_dir / mlir_name
+    mlir_path.write_text(mlir_text, encoding="utf-8")
+
+    result = {
+        "layers": layers,
+        "mlir": str(mlir_path),
+        "layout": layout,
+        "multi": multi,
+    }
+    meta_json = {k: v for k, v in result.items() if k != "layers"}
+    meta_json["layers"] = [
+        {kk: vv for kk, vv in l.items() if kk not in ("gemm_mlir", "func_args")}
+        for l in layers
+    ]
     (out_dir / "bridge_meta.json").write_text(
-        json.dumps({k: v for k, v in meta.items() if k not in ("input_nchw_int8", "a_raw", "b_raw", "acc_raw")},
-                   indent=2),
+        json.dumps(meta_json, indent=2),
         encoding="utf-8",
     )
-    np.savez(
-        out_dir / "bridge_arrays.npz",
-        x_nchw=x_nchw,
-        a_raw=a_raw,
-        b_raw=b_raw,
-        acc_raw=acc_raw,
-        a_pad=a_pad,
-        b_pad=b_pad,
-    )
-    return meta
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "onnx",
-        type=Path,
-        default=SVTA / "examples/onnx/qlinearconv_debug.onnx",
-        nargs="?",
-    )
-    parser.add_argument(
-        "-o",
-        "--out-dir",
-        type=Path,
-        default=Path("/tmp/onnx_qconv_bridge"),
-    )
+    parser.add_argument("onnx", type=Path, nargs="?", default=SVTA / "examples/onnx/qlinearconv_debug.onnx")
+    parser.add_argument("-o", "--out-dir", type=Path, default=Path("/tmp/onnx_qconv_bridge"))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--layout",
+        choices=("col-pad", "square-pad"),
+        default="col-pad",
+    )
+    parser.add_argument("--multi", action="store_true")
+    parser.add_argument(
+        "--zero-input",
+        action="store_true",
+        help="Use all-zero int8 input (matches upstream golden generation)",
+    )
     args = parser.parse_args()
 
-    meta = build_layer(args.onnx, args.out_dir, seed=args.seed)
-    d = meta["raw_dims"]
-    print(
-        f"Bridge OK: {meta['name']} padded GEMM {d['M']}x{d['K']}x{d['N']} "
-        f"(logical {d['ah']}x{d['aw']}x{meta['output_shape'][1]})"
-    )
-    print(f"  MLIR: {meta['paths']['mlir']}")
+    meta = build_model(args.onnx, args.out_dir, seed=args.seed,
+                       layout=args.layout, multi=args.multi,
+                       zero_input=args.zero_input)
+    for l in meta["layers"]:
+        d = l["raw_dims"]
+        print(
+            f"  {l['name']}: {d['M']}x{d['K']}x{d['N']} "
+            f"(logical {d['ah']}x{d['aw']}x{l['output_shape'][1]}) "
+            f"expand_bias={l['expand_bias']}"
+        )
+    print(f"MLIR: {meta['mlir']}")
 
 
 if __name__ == "__main__":

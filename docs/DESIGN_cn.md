@@ -63,7 +63,7 @@ flowchart TD
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
 | **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM/MAX_IMM/SHR_IMM 16×16 字节级验收）+ **真·层间串联**（`fsim_nn` 2×16×16 GEMM 串联，256/256 元素一致，`scripts/run_fsim_nn_2layer.sh`）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收 | ✅ 全部完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering + fsim_nn 层间串联）|
-| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A 进行中（单层 QLinearConv Python 桥接 → MLIR → 字节级 + FSIM ✅） |
+| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A ✅；增量 B 进行中（col-pad 25×32 + expand_bias，数据 bin 字节级 OK）；增量 C 进行中（two_qlinearconv_small 多层桥接 + fsim_nn） |
 
 ### 2.2 阶段一已落地的数据流
 
@@ -396,17 +396,25 @@ MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待
 
 接入 `onnx-mlir`，把 `QLinearConv`/`QLinearMul`/`MaxPool`/`Relu` 等降到 `linalg`/`tosa`，再进入阶段二/三管线；量化 rescale、CPU 回退算子（`QLinearAdd`/`Concat`）按上游 `dependency.csv` 的约定处理。
 
-#### 增量 A（进行中）：单层 QLinearConv Python 桥接 ✅
+#### 增量 A：单层 QLinearConv Python 桥接 ✅
 
 - **`scripts/onnx_qconv_bridge.py`**：`onnx` 包解析 `qlinearconv_debug.onnx`，Im2Col/ker2col + padding → raw bin + `vta.gemm` MLIR（32×32×16，strategy=2）。
-- **`scripts/emit_dependency_csv.py`**：写 `dependency.csv`（格式对齐上游）。
-- **`scripts/run_onnx_qconv.sh`**：桥接 → `--lower-vta-gemm` → `vta-translate` → FSIM；`instructions.bin`/`uop.bin` 字节级 + FSIM 结果对齐黄金。
-- **`scripts/make_golden_onnx_qconv.sh`**：上游 VTA 编译器生成 `test/golden/qlinearconv_padded/`。
-- **限制**：行维 pad 到 16 倍数（25→32）以兼容现有 verifier；与上游 unpadded 25×32 的字节级对齐留待增量 B（partial row block + LOAD pad 位）。
+- **`scripts/run_onnx_qconv.sh`**：square-pad 形态；`instructions.bin`/`uop.bin` 字节级 + FSIM 对齐 `test/golden/qlinearconv_padded/`。
 
-#### 待做（增量 B–G）
+#### 增量 B（进行中）：col-pad + expand_bias
 
-- partial row block（不 pad 行）；`two_qlinearconv` + `fsim_nn`；onnx-mlir C++ 前端；MaxPool/Relu/Mul；CPU 算子；LeNet-5 整网。
+- **`--layout col-pad`**：M=25 不 pad 行；`expand_bias=true`（1×N 偏置 VTA 侧广播）。
+- C++：verifier 放宽 M；`VTADataEmitter` partial row + `--accumulator`/`--acc-rows`；`LowerVTAGemm` strategy-2 + bias 广播 uop/ALU 序列。
+- **`scripts/run_onnx_qconv_colpad.sh`** + **`test/golden/qlinearconv_upstream/`**：INP/WGT/ACC 字节级 OK；INSN/UOP 304B/36B 近对齐。
+
+#### 增量 C（进行中）：two_qlinearconv 多层
+
+- **`--multi`** + **`--vta-dram-allocation`** + 逐层 `vta-translate --layer`。
+- **`scripts/run_onnx_two_qconv.sh`**、`gen_two_qlinearconv_small.py`（16×16）；`dependency.csv` + `fsim_nn`。
+
+#### 待做（增量 D–G）
+
+- onnx-mlir C++ 前端；MaxPool/Relu/Mul；CPU 算子；LeNet-5 整网。
 
 ---
 

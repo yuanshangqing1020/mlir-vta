@@ -29,8 +29,8 @@ int main(int argc, char **argv) {
   std::string input = argv[1];
   std::string outDir = ".";
   bool emitData = false;
-  std::string dataInput, dataWeight;
-  unsigned dataRows = 16, dataCols = 16, dataK = 16;
+  std::string dataInput, dataWeight, dataAcc;
+  unsigned dataRows = 16, dataCols = 16, dataK = 16, dataAccRows = 0;
   std::vector<LayerSpec> layers;
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
@@ -42,6 +42,10 @@ int main(int argc, char **argv) {
       dataInput = argv[++i];
     } else if (arg == "--weight" && i + 1 < argc) {
       dataWeight = argv[++i];
+    } else if (arg == "--accumulator" && i + 1 < argc) {
+      dataAcc = argv[++i];
+    } else if (arg == "--acc-rows" && i + 1 < argc) {
+      dataAccRows = std::stoul(argv[++i]);
     } else if (arg == "--rows" && i + 1 < argc) {
       dataRows = std::stoul(argv[++i]);
     } else if (arg == "--cols" && i + 1 < argc) {
@@ -121,7 +125,8 @@ int main(int argc, char **argv) {
       return 1;
     }
     if (mlir::failed(mlir::vta::emitData(dataInput, dataWeight, outDir, dataRows,
-                                         dataK, dataCols))) {
+                                         dataK, dataCols, /*name=*/"",
+                                         dataAcc, dataAccRows))) {
       llvm::errs() << "vta-translate: data emission failed\n";
       return 1;
     }

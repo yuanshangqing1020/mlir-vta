@@ -74,76 +74,98 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
                                   llvm::StringRef weightPath,
                                   llvm::StringRef outDir, unsigned mRows,
                                   unsigned kDimElems, unsigned nCols,
-                                  llvm::StringRef name) {
-  // `name` is the layer suffix for multi-layer compilation (e.g. "L0"); when
-  // non-empty, data/metadata files get the suffix and the per-layer
-  // memory_addresses/layers_name CSVs are left to the binary emitter (which
-  // owns them in multi-layer mode). out_init.bin is never suffixed (matches
-  // upstream, which overwrites it across layers).
+                                  llvm::StringRef name,
+                                  llvm::StringRef accPath, unsigned accRows) {
   const std::string sfx = name.str();
-  if (mRows % kDim || kDimElems % kDim || nCols % kDim || mRows == 0 ||
-      kDimElems == 0 || nCols == 0) {
-    llvm::errs() << "vta-translate: data dims must be positive multiples of 16 "
-                    "(got "
+  if (kDimElems % kDim || nCols % kDim || mRows == 0 || kDimElems == 0 ||
+      nCols == 0) {
+    llvm::errs() << "vta-translate: K/N must be positive multiples of 16, "
+                    "M must be positive (got "
                  << mRows << "x" << kDimElems << "x" << nCols << ")\n";
     return failure();
   }
-  const unsigned Mb = mRows / kDim, Kb = kDimElems / kDim, Nb = nCols / kDim;
+  const unsigned Mb = (mRows + kDim - 1) / kDim;
+  const unsigned Kb = kDimElems / kDim;
+  const unsigned Nb = nCols / kDim;
+  const unsigned accM = accRows > 0 ? accRows : mRows;
+  const unsigned accMb = (accM + kDim - 1) / kDim;
 
   std::vector<int32_t> input, weight;
   if (failed(readMatrix(inputPath, mRows, kDimElems, input)) ||
       failed(readMatrix(weightPath, kDimElems, nCols, weight)))
     return failure();
 
-  // input.bin: block-major (row-major over blocks), each 16x16 block row-major,
-  // no transpose. Block (bi, bk) covers input[16*bi + r][16*bk + c].
+  std::vector<int32_t> accData;
+  if (!accPath.empty()) {
+    if (failed(readMatrix(accPath, accM, nCols, accData)))
+      return failure();
+  }
+
+  // input.bin: block-major; zero-pad partial row/column blocks.
   std::vector<int32_t> inBlocked;
-  inBlocked.reserve(static_cast<size_t>(mRows) * kDimElems);
+  inBlocked.reserve(static_cast<size_t>(Mb) * Kb * kBlockElems);
   for (unsigned bi = 0; bi < Mb; ++bi)
     for (unsigned bk = 0; bk < Kb; ++bk)
       for (unsigned r = 0; r < kDim; ++r)
-        for (unsigned c = 0; c < kDim; ++c)
-          inBlocked.push_back(input[(16 * bi + r) * kDimElems + (16 * bk + c)]);
+        for (unsigned c = 0; c < kDim; ++c) {
+          unsigned gr = 16 * bi + r;
+          unsigned gc = 16 * bk + c;
+          int32_t v = 0;
+          if (gr < mRows && gc < kDimElems)
+            v = input[gr * kDimElems + gc];
+          inBlocked.push_back(v);
+        }
   if (failed(writeBinary((outDir + "/input" + sfx + ".bin").str(), inBlocked)))
     return failure();
 
-  // weight.bin: block-major, each 16x16 block transposed. Written block (bk, bj)
-  // element (r, c) = weight[16*bk + c][16*bj + r].
   std::vector<int32_t> wBlocked;
-  wBlocked.reserve(static_cast<size_t>(kDimElems) * nCols);
+  wBlocked.reserve(static_cast<size_t>(Kb) * Nb * kBlockElems);
   for (unsigned bk = 0; bk < Kb; ++bk)
     for (unsigned bj = 0; bj < Nb; ++bj)
       for (unsigned r = 0; r < kDim; ++r)
-        for (unsigned c = 0; c < kDim; ++c)
-          wBlocked.push_back(weight[(16 * bk + c) * nCols + (16 * bj + r)]);
+        for (unsigned c = 0; c < kDim; ++c) {
+          unsigned gr = 16 * bk + c;
+          unsigned gc = 16 * bj + r;
+          int32_t v = 0;
+          if (gr < kDimElems && gc < nCols)
+            v = weight[gr * nCols + gc];
+          wBlocked.push_back(v);
+        }
   if (failed(writeBinary((outDir + "/weight" + sfx + ".bin").str(), wBlocked)))
     return failure();
 
-  // accumulator<NAME>.bin / out_init.bin: (Mb*Nb) blocks of 256 int32 zeros.
-  std::vector<int32_t> zeros(static_cast<size_t>(Mb) * Nb * kBlockElems, 0);
+  // accumulator: block-major from acc matrix (often 1xN bias row).
+  std::vector<int32_t> accBlocked(static_cast<size_t>(accMb) * Nb * kBlockElems,
+                                  0);
+  if (!accData.empty()) {
+    for (unsigned bi = 0; bi < accMb; ++bi)
+      for (unsigned bj = 0; bj < Nb; ++bj)
+        for (unsigned r = 0; r < kDim; ++r)
+          for (unsigned c = 0; c < kDim; ++c) {
+            unsigned gr = 16 * bi + r;
+            unsigned gc = 16 * bj + c;
+            if (gr < accM && gc < nCols)
+              accBlocked[(bi * Nb + bj) * kBlockElems + r * kDim + c] =
+                  accData[gr * nCols + gc];
+          }
+  }
+  std::vector<int32_t> outBlocked(static_cast<size_t>(Mb) * Nb * kBlockElems, 0);
   if (failed(writeBinary((outDir + "/accumulator" + sfx + ".bin").str(),
-                         zeros)) ||
-      failed(writeBinary((outDir + "/out_init.bin").str(), zeros)))
+                         accBlocked)) ||
+      failed(writeBinary((outDir + "/out_init.bin").str(), outBlocked)))
     return failure();
 
-  // The "Is it square?" column is a fixed per-role flag in the upstream
-  // compiler (data_definition.py): A/Y/BS = True, X = doExpandBias (False for
-  // pure GEMM), C = doStoreFullMatrix (True for pure GEMM). It is NOT derived
-  // from the actual dimensions, so rectangular matrices still report True.
-  // Python's csv writer terminates rows with CRLF, so reproduce \r\n exactly.
   std::string metadata =
       "Matrix (or Block Size),Nb rows,Nb columns,Is it square?\r\n"
       "BS,16,16,True\r\n";
   metadata += "A," + std::to_string(mRows) + "," + std::to_string(kDimElems) +
               ",True\r\n";
-  metadata += "X," + std::to_string(mRows) + "," + std::to_string(nCols) +
-              ",False\r\n";
+  metadata += "X," + std::to_string(accM) + "," + std::to_string(nCols) +
+              "," + (accM < mRows ? "False" : "True") + "\r\n";
   metadata += "Y,0,0,True\r\n";
   metadata += "C," + std::to_string(mRows) + "," + std::to_string(nCols) +
               ",True\r\n";
 
-  // memory_addresses.csv: page-aligned bases that shift with matrix size
-  // (computed identically to the lowering and the upstream dram_allocation).
   const vta::GemmLayout L = vta::computeGemmLayout(Mb, Kb, Nb);
   auto hx = [](int64_t v) {
     char buf[20];

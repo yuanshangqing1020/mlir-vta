@@ -48,11 +48,13 @@ struct LowerVTAGemmPass
         signalPassFailure();
         return;
       }
-      // Block dimensions (each matrix dim is a multiple of 16, enforced by the
-      // op verifier): Mb x Kb (A), Kb x Nb (B), Mb x Nb (C).
-      const int64_t Mb = lhsT.getShape()[0] / 16;
+      // Block dimensions: row blocks ceil(M/16) for partial tail rows; K/N
+      // columns are multiples of 16 (verifier). Mb x Kb (A), Kb x Nb (B).
+      const int64_t M = lhsT.getShape()[0];
+      const int64_t Mb = (M + 15) / 16;
       const int64_t Kb = lhsT.getShape()[1] / 16;
       const int64_t Nb = rhsT.getShape()[1] / 16;
+      const bool expandBias = g.expand_bias();
       const int64_t nbA = Mb * Kb, nbB = Kb * Nb, nbC = Mb * Nb;
 
       // Upstream SRAM block buffer capacities (default vta_config.json).
@@ -95,7 +97,9 @@ struct LowerVTAGemmPass
       SmallVector<int64_t> uopDst, uopSrc, uopWgt;
       uopDst.push_back(0); uopSrc.push_back(0); uopWgt.push_back(0); // reset
 
-      if (!isOverfit) {
+      const bool useCase1 = !isOverfit && strategyId == 1 && !expandBias;
+
+      if (useCase1) {
         // CASE-1: global-index UOP entries.
         for (int64_t a = 0; a < nbA; ++a) {
           int64_t i = a / Kb, k = a % Kb;
@@ -184,6 +188,28 @@ struct LowerVTAGemmPass
       }
       const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
 
+      // Bias-expansion uop pairs (strategy-2 + expand_bias): one pair per ACC
+      // tile block, appended after the main GEMM uop table entries.
+      int64_t expandUopBase = static_cast<int64_t>(uopDst.size());
+      if (expandBias && strategyId == 2) {
+        for (int64_t i = 0; i < Mb; i += tile_h) {
+          int64_t cur_h = std::min(tile_h, Mb - i);
+          for (int64_t j = 0; j < Nb; j += tile_w) {
+            int64_t cur_w = std::min(tile_w, Nb - j);
+            int64_t nCTile = cur_h * cur_w;
+            for (int64_t lc = 0; lc < nCTile; ++lc) {
+              int64_t sramBase = lc * 16;
+              uopDst.push_back(sramBase);
+              uopSrc.push_back(0);
+              uopWgt.push_back(0);
+              uopDst.push_back(sramBase + 1);
+              uopSrc.push_back(sramBase);
+              uopWgt.push_back(0);
+            }
+          }
+        }
+      }
+
       // Page-aligned DRAM layout (replicates upstream dram_allocation). Bases
       // shift with matrix size and, for multi-layer, climb across layers.
       int64_t kUopBase, kInpBase, kWgtBase, kAccBase, kOutBase;
@@ -223,7 +249,7 @@ struct LowerVTAGemmPass
                                    /*loop_out=*/1, /*loop_in=*/16,
                                    /*dst_factor_out=*/16, /*dst_factor_in=*/1);
 
-      if (!isOverfit) {
+      if (!isOverfit && strategyId == 1 && !expandBias) {
         // CASE-1: single-step schedule. All blocks fit on-chip simultaneously.
         // Merged data loads: y_size = number of blocks (block logical addresses
         // are equidistant). INP/ACC stride 16 (16 vectors/block), WGT stride 1.
@@ -237,7 +263,8 @@ struct LowerVTAGemmPass
                                  /*x_size=*/1, /*x_stride=*/1);
         b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC, /*pop_prev=*/true,
                                  false, false, false, /*sram_base=*/0,
-                                 /*dram_base=*/kAccBase, /*y_size=*/nbC,
+                                 /*dram_base=*/kAccBase,
+                                 /*y_size=*/expandBias ? 1 : nbC,
                                  /*x_size=*/16, /*x_stride=*/16);
 
         // LOAD the G gemm uops (uop.bin index 1..G -> dram = base + 1).
@@ -294,6 +321,30 @@ struct LowerVTAGemmPass
         // inpDramBase, wgtDramBase, accDramBase: logical DRAM addresses.
         // pushNext: whether this GEMM should push CMP->ST (STORE follows).
         // accPopNext: whether ACC LOAD should pop ST->CMP (prior tile's STORE exists).
+        int64_t expandUopCursor = expandUopBase;
+        auto emitExpandBiasBlock = [&](int64_t sramBase, int64_t accDramBase,
+                                       bool popPrev, bool popNext) {
+          int64_t dramUop = kUopBase + expandUopCursor;
+          expandUopCursor += 2;
+          b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, false, false,
+                                   false, false, /*sram_base=*/0,
+                                   /*dram_base=*/dramUop, /*y_size=*/1,
+                                   /*x_size=*/2, /*x_stride=*/2);
+          b.create<vtaisa::GemmInsnOp>(
+              loc, popPrev, popNext, false, false, /*reset=*/true,
+              /*uop_bgn=*/0, /*uop_end=*/1, /*loop_out=*/1, /*loop_in=*/16,
+              /*dst_factor_out=*/0, /*dst_factor_in=*/1);
+          b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::ACC, false, false,
+                                   false, false, sramBase, accDramBase,
+                                   /*y_size=*/1, /*x_size=*/1, /*x_stride=*/1);
+          b.create<vtaisa::AluInsnOp>(
+              loc, false, false, false, false, false, /*uop_bgn=*/1,
+              /*uop_end=*/2, /*loop_out=*/1, /*loop_in=*/15,
+              /*dst_factor_out=*/0, /*dst_factor_in=*/1, /*src_factor_out=*/0,
+              /*src_factor_in=*/0, /*alu_opcode=*/2, /*use_imm=*/false,
+              /*imm=*/0);
+        };
+
         auto emitStep = [&](int64_t nbInp, int64_t nbWgt, int64_t nbAcc, int64_t nbUop,
                             int64_t inpDramBase, int64_t wgtDramBase, int64_t accDramBase,
                             bool pushNext, bool accPopNext = false) {
@@ -377,14 +428,37 @@ struct LowerVTAGemmPass
                  bool pushNext = isLastK;  // STORE follows the last k-step
                  ++stepIdx;
 
-                 int64_t nbAcc = isFirst ? nCTile : 0;
+                 int64_t nbAcc = isFirst ? (expandBias ? 0 : nCTile) : 0;
                  int64_t inpBase = kInpBase + (i * Kb + k) * 16;
                  int64_t wgtBase = kWgtBase + k * Nb + j;
                  int64_t accBase = kAccBase + cTile[0] * 16;
-                 // First k-step of a non-first tile: ACC LOAD must also pop ST->CMP.
                  bool accPopNext = isFirst && hasPriorStore;
-                 emitStep(nATile, nBTile, nbAcc, nUopTile,
-                          inpBase, wgtBase, accBase, pushNext, accPopNext);
+
+                 if (isFirst && expandBias) {
+                   b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::INP, false,
+                                            /*pop_next=*/true, false, false, 0,
+                                            inpBase, nATile, 16, 16);
+                   b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::WGT, false,
+                                            false, false, /*push_next=*/true, 0,
+                                            wgtBase, nBTile, 1, 1);
+                   for (int64_t lc = 0; lc < nCTile; ++lc) {
+                     bool popPrev = (lc == 0);
+                     bool popNext = (lc == 0) && hasPriorStore;
+                     emitExpandBiasBlock(lc * 16, kAccBase, popPrev, popNext);
+                   }
+                   b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
+                                            /*pop_prev=*/true, false, false, false,
+                                            0, kUopBase + 1 + uopCursor, 1, nUopTile,
+                                            nUopTile);
+                   b.create<vtaisa::GemmInsnOp>(loc, false, false,
+                                                /*push_prev=*/true,
+                                                /*push_next=*/pushNext, false, 0,
+                                                nUopTile, 1, 16, 0, 1, 0, 1);
+                   uopCursor += nUopTile;
+                 } else {
+                   emitStep(nATile, nBTile, nbAcc, nUopTile, inpBase, wgtBase,
+                            accBase, pushNext, accPopNext);
+                 }
                }
                // STORE the tile's C blocks one by one.
                for (int64_t lc = 0; lc < nCTile; ++lc) {

@@ -1,0 +1,10 @@
+Line identifier,Number of layers
+nb_steps,1
+Line identifier,Nb rows,Nb columns
+image,25,3
+Line identifier,Final layer name,Output tensor channels,Output tensor height,Output tensor width
+output,QLinearConv1,3,5,5
+Execution order,Processor,Layer name
+0,vta,QLinearConv1
+Layer name,Processor,Reshape,offsetA,scaleA,offsetB,scaleB,offsetU,scaleU,offsetV,scaleV,Input channels,Input height,Input width,Kernel height,Kernel width,Stride height,Stride width,Padding top,Padding left,Padding bottom,Padding right,Output channel,Output height,Output width,offsetC,scaleC,Rescaling factor,Parent layers
+QLinearConv1,vta,im2row,-128,0.031500000506639481,0,0.004999999888241291,0,1,0,1,3,5,5,3,3,1,1,1,1,1,1,3,5,5,-128,0.024100000038743019,0.0065352697856724262,INP,1,image

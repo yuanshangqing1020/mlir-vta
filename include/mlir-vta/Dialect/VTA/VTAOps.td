@@ -4,12 +4,15 @@ include "mlir-vta/Dialect/VTA/VTADialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def VTA_GemmOp : VTA_Op<"gemm"> {
-  let summary = "block GEMM: acc += lhs * rhs (in-place on acc memref), dims multiple of 16";
+  let summary = "block GEMM: acc += lhs * rhs (in-place on acc memref); K/N multiples of 16";
   // Optional `name` is the layer NAME (file suffix) for multi-layer compilation;
   // absent/"" means a single unnamed layer (instructions.bin without suffix).
+  // `expand_bias`: when true, ACC is a 1xN row broadcast at VTA compile time
+  // (QLinearConv bias), matching upstream doExpandBias.
   let arguments = (ins AnyMemRef:$lhs, AnyMemRef:$rhs, AnyMemRef:$acc,
                        OptionalAttr<StrAttr>:$name,
-                       DefaultValuedAttr<I64Attr, "1">:$strategy);
+                       DefaultValuedAttr<I64Attr, "1">:$strategy,
+                       DefaultValuedAttr<BoolAttr, "false">:$expand_bias);
   let results = (outs);
   let assemblyFormat =
     "`ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)` "
@@ -25,11 +28,14 @@ def VTA_GemmOp : VTA_Op<"gemm"> {
     int64_t m = lhsT.getShape()[0], k = lhsT.getShape()[1];
     int64_t k2 = rhsT.getShape()[0], n = rhsT.getShape()[1];
     int64_t am = accT.getShape()[0], an = accT.getShape()[1];
-    // Phase-3: each dimension must be a positive multiple of 16.
-    for (int64_t d : {m, k, n})
+    // M may be any positive row count (partial 16-row blocks); K/N must be
+    // positive multiples of 16 (column blocking).
+    if (m <= 0)
+      return emitOpError("vta.gemm requires positive M rows");
+    for (int64_t d : {k, n})
       if (d <= 0 || d % 16 != 0)
-        return emitOpError("vta.gemm requires dimensions that are positive "
-                           "multiples of 16");
+        return emitOpError("vta.gemm requires K/N that are positive multiples "
+                           "of 16");
     if (k2 != k || am != m || an != n)
       return emitOpError("vta.gemm shape mismatch: expected lhs MxK, rhs KxN, "
                          "acc MxN");
