@@ -24,6 +24,7 @@ def main() -> None:
     output_shape = [N, out_channels, out_H, out_W]
     weight_shape = (out_channels, in_c, kH, kW)
 
+    np.random.seed(42)
     W_data = np.random.randint(-128, 127, size=weight_shape, dtype=np.int8)
     B_data = np.random.randint(-1000, 1000, size=(out_channels,), dtype=np.int32)
 
@@ -56,6 +57,7 @@ def main() -> None:
     Y_info = helper.make_tensor_value_info(relu_out, TensorProto.INT8, output_shape)
     graph = helper.make_graph([conv, relu], "conv_relu", [X_info], [Y_info], initializers)
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 9
     onnx.checker.check_model(model)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     onnx.save(model, str(OUT))

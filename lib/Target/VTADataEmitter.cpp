@@ -160,8 +160,12 @@ LogicalResult mlir::vta::emitData(llvm::StringRef inputPath,
       "BS,16,16,True\r\n";
   metadata += "A," + std::to_string(mRows) + "," + std::to_string(kDimElems) +
               ",True\r\n";
-  metadata += "X," + std::to_string(accM) + "," + std::to_string(nCols) +
-              "," + (accM < mRows ? "False" : "True") + "\r\n";
+  if (accData.empty())
+    metadata += "X," + std::to_string(mRows) + "," + std::to_string(nCols) +
+                ",False\r\n";
+  else
+    metadata += "X," + std::to_string(accM) + "," + std::to_string(nCols) +
+                "," + (accM < mRows ? "False" : "True") + "\r\n";
   metadata += "Y,0,0,True\r\n";
   metadata += "C," + std::to_string(mRows) + "," + std::to_string(nCols) +
               ",True\r\n";

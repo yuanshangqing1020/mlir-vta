@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Conv+Relu two-layer → vta-dram-allocation → gemm+alu → fsim_nn.
+# Conv+Relu two-layer → vta-dram-allocation → gemm+alu → fsim_nn + upstream golden compare.
 set -euo pipefail
 ROOT=/mnt/c/MLIR-VTA
 SVTA=$ROOT/standalone-vta
@@ -9,12 +9,17 @@ TRANSLATE=$HOME/mlir-vta-build/bin/vta-translate
 PY=/home/john/miniconda3/envs/standalone-vta/bin/python3
 FSIM_DIR=$SVTA/src/simulators/functional_simulator
 ONNX=$SVTA/examples/onnx/conv_relu_debug.onnx
+GD="$MLIRVTA/test/golden/conv_relu_debug"
 BR=/tmp/onnx_conv_relu
 OUT=/tmp/onnx_conv_relu_out
 CO=$SVTA/compiler_output
 
 if [[ ! -f "$ONNX" ]]; then
   "$PY" "$MLIRVTA/scripts/gen_conv_relu_debug.py"
+fi
+
+if [[ ! -f "$GD/reference.bin" ]]; then
+  bash "$MLIRVTA/scripts/make_golden_conv_relu_upstream.sh"
 fi
 
 rm -rf "$BR" "$OUT" && mkdir -p "$BR" "$OUT"
@@ -70,6 +75,29 @@ for l in layers:
 PY
 
 $PY - <<PY
+import json
+from pathlib import Path
+layers = json.load(open("$BR/bridge_meta.json"))["layers"]
+out = Path("$OUT")
+for l in layers:
+    if "alu_mlir" not in l:
+        continue
+    name = l["name"]
+    m, n = l["M"], 16
+    meta = (
+        "Matrix (or Block Size),Nb rows,Nb columns,Is it square?\\r\\n"
+        "BS,16,16,True\\r\\n"
+        "A,0,0,True\\r\\n"
+        f"X,{m},{n},False\\r\\n"
+        "Y,0,0,True\\r\\n"
+        f"C,{m},{n},True\\r\\n"
+    )
+    (out / f"metadata{name}.csv").write_text(meta)
+    (out / f"weight{name}.bin").write_bytes(b"")
+    print(f"Wrote alu metadata/weight for {name}")
+PY
+
+$PY - <<PY
 import json, sys
 sys.path.insert(0, "$MLIRVTA/scripts")
 from emit_dependency_csv import write_dependency_csv
@@ -92,7 +120,8 @@ for l in $($PY -c "import json; print(' '.join(x['name'] for x in json.load(open
   : > "$CO/add_accumulator${l}.bin"
 done
 
-cp "$BR/input_nchw_$(python3 -c "import json;print(json.load(open('$BR/bridge_meta.json'))['layers'][0]['name'])").bin" "$CO/input_nn.bin"
+# Upstream golden input (seed=42) for reproducible numeric compare.
+cp "$GD/input_nn.bin" "$CO/input_nn.bin"
 
 for f in "$OUT"/instructions*.bin "$OUT"/uop*.bin "$OUT"/input*.bin "$OUT"/weight*.bin "$OUT"/accumulator*.bin "$OUT"/metadata*.csv "$OUT"/memory_addresses*.csv; do
   [[ -f "$f" ]] && cp "$f" "$CO/"
@@ -102,11 +131,12 @@ echo "=== Run fsim_nn (Conv+Relu) ==="
 cd "$FSIM_DIR"
 ./build/fsim_nn 2>&1 | grep -E "steps|VTA|written|ERROR" || true
 
-if [[ -f "$CO/final_output.bin" ]]; then
-  echo "=== fsim_nn produced final_output.bin ==="
-  wc -c "$CO/final_output.bin"
-  echo "Conv+Relu fsim_nn complete."
-else
-  echo "WARNING: final_output.bin not found" >&2
+if [[ ! -f "$CO/final_output.bin" ]]; then
+  echo "ERROR: final_output.bin not found" >&2
   exit 1
 fi
+
+echo "=== Numeric compare vs NumPy QLinearConv+ReLU reference (seed=42) ==="
+cmp "$CO/final_output.bin" "$GD/reference.bin"
+echo "=== FSIM vs REFERENCE: ACCEPT ==="
+echo "Conv+Relu fsim_nn complete."

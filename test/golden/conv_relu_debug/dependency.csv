@@ -1,0 +1,12 @@
+Line identifier,Number of layers
+nb_steps,2
+Line identifier,Nb rows,Nb columns
+image,25,3
+Line identifier,Final layer name,Output tensor channels,Output tensor height,Output tensor width
+output,Relu1,3,5,5
+Execution order,Processor,Layer name
+0,vta,Y_conv
+1,vta,Relu1
+Layer name,Processor,Reshape,offsetA,scaleA,offsetB,scaleB,offsetU,scaleU,offsetV,scaleV,Input channels,Input height,Input width,Kernel height,Kernel width,Stride height,Stride width,Padding top,Padding left,Padding bottom,Padding right,Output channel,Output height,Output width,offsetC,scaleC,Rescaling factor,Parent layers
+Y_conv,vta,im2row,-128,0.03150000050663948,0,0.004999999888241291,0,1,0,1,3,5,5,3,3,1,1,1,1,1,1,3,5,5,-128,0.02410000003874302,0.006535269658074769,INP,1,image
+Relu1,vta,int32,0,1.0,0,1.0,0,1,0,1,3,5,5,1,1,1,1,0,0,0,0,3,5,5,0,1.0,1.0,INP,1,Y_conv

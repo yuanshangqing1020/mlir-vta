@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QLinearMul / MulConstant 16x16 → vta.gemm(mul_constant) → byte-level golden.
+# QLinearMul / MulConstant 16x16 → vta.gemm(mul_constant) → byte-level golden + FSIM.
 set -euo pipefail
 ROOT=/mnt/c/MLIR-VTA
 SVTA=$ROOT/standalone-vta
@@ -12,6 +12,8 @@ BR=/tmp/onnx_qlinearmul
 OUT=/tmp/onnx_qlinearmul_out
 GD="$MLIRVTA/test/golden/matmulConst_16x16"
 CO=$SVTA/compiler_output
+FSIM=$SVTA/src/simulators/functional_simulator/build/fsim_single_layer
+STAGE="$MLIRVTA/scripts/stage_fsim_single_layer.sh"
 
 rm -rf "$BR" "$OUT" && mkdir -p "$BR" "$OUT"
 
@@ -40,18 +42,19 @@ echo "=== byte-level vs upstream golden ==="
 cmp "$OUT/instructions${NAME}.bin" "$GD/instructions.bin" && echo "INSN OK"
 cmp "$OUT/uop${NAME}.bin" "$GD/uop.bin" && echo "UOP OK"
 
-cp "$GD/input.bin" "$INP" 2>/dev/null || true
+# Use golden blocked INP/WGT (same raw matrix as bridge seed) for FSIM.
+cp "$GD/input.bin" "$OUT/input${NAME}.bin"
+cp "$GD/weight.bin" "$OUT/weight${NAME}.bin"
 
 rm -f "$SVTA/log_output/fsim_report.txt"
-cp "$OUT/instructions${NAME}.bin" "$CO/instructions.bin"
-cp "$OUT/uop${NAME}.bin" "$CO/uop.bin"
-cp "$INP" "$CO/input.bin"
-cp "$WGT" "$CO/weight.bin"
-: > "$CO/add_accumulator.bin"
-: > "$CO/accumulator.bin"
-cd "$SVTA/examples"
-make fsim_compile_single_layer >/dev/null 2>&1
-make fsim_single_layer >/dev/null 2>&1
+bash "$STAGE" "$OUT" "$NAME" "$CO"
+
+FSIM_DIR=$SVTA/src/simulators/functional_simulator
+cd "$FSIM_DIR"
+timeout 120 "$FSIM" > "$SVTA/log_output/fsim_report.txt" 2>&1 || {
+  echo "ERROR: fsim_single_layer timed out or failed" >&2
+  exit 1
+}
 sed -n '/Final result/,/^} $/p' "$SVTA/log_output/fsim_report.txt" > "$OUT/fsim_result.txt"
 if [[ -f "$GD/fsim_result.txt" ]]; then
   diff -q "$OUT/fsim_result.txt" "$GD/fsim_result.txt" && echo "=== FSIM vs UPSTREAM: ACCEPT ==="
