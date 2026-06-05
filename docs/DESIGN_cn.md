@@ -63,7 +63,7 @@ flowchart TD
 | **一** | `vtaisa` 低层 op + 二进制/数据/CSV 发射器 + 单块 `vta.gemm` 展开；16×16 GEMM 字节级复刻 + FSIM 通过 | ✅ 已完成 |
 | **二** | `linalg.matmul → vta.gemm` 的 16×16 tiling + bufferization | ✅ 已完成（linalg 入口·16×16 单块）|
 | **三** | 通用维度 GEMM + 多层编译 + Overfit Strategy-1/2/3/4 + **依赖信号量推导 pass**（`--vta-semaphore-derive`，4 计数器状态机，全策略字节级验收）+ **ALU lowering**（`vta.alu` + `--lower-vta-alu`，ADD_IMM/MAX_IMM/SHR_IMM 16×16 字节级验收）+ **真·层间串联**（`fsim_nn` 2×16×16 GEMM 串联，256/256 元素一致，`scripts/run_fsim_nn_2layer.sh`）；已覆盖方阵/矩形/多块（32×32、32×48×16、48×48×48）字节级+FSIM、两层 16×16 字节级（15/15 对齐上游）、四种溢出策略（S1-S4）字节级验收 | ✅ 全部完成（通用 GEMM + 多层 + Strategy-1/2/3/4 + 信号量推导 + ALU lowering + fsim_nn 层间串联）|
-| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A ✅；增量 B ✅（col-pad 25×32 + expand_bias，19 insn / 9 uop 字节级 + FSIM）；增量 C ✅（two_qlinearconv_small 2 层 + fsim_nn） |
+| **四** | `onnx-mlir` 前端；整网（LeNet-5）端到端；替换 Python 工具链 | 增量 A ✅；增量 B ✅；增量 C ✅；增量 E 进行中（ReLU 16×16 MAX_IMM 字节级 + FSIM ✅） |
 
 ### 2.2 阶段一已落地的数据流
 
@@ -411,6 +411,11 @@ MAX pool（opcode=1）、SHR（opcode=3）结构相同，pass 直接支持，待
 
 - **`--multi`** + **`--vta-dram-allocation`** + 逐层 `vta-translate --layer`。
 - **`scripts/run_onnx_two_qconv.sh`**、`gen_two_qlinearconv_small.py`（16×16→256×144×16×2 层）；`dependency.csv` + `fsim_nn` 产出 `final_output.bin`（4096 B）。
+
+#### 增量 E（进行中）：Relu / MaxPool / QLinearMul
+
+- **ReLU 16×16 ✅**：`scripts/onnx_relu_bridge.py` → `vta.alu` MAX_IMM；`run_onnx_relu.sh` + `test/golden/relu_16x16/` 字节级 INSN/UOP + FSIM 与 upstream 一致。
+- 待做：Conv+Relu 多层 fsim_nn、MaxPool、QLinearMul。
 
 #### 待做（增量 D–G）
 
