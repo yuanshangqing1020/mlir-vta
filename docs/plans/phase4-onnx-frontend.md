@@ -72,9 +72,10 @@
 
 ---
 
-## 后续增量（不在本计划范围）
+## 后续增量
 
-- **增量 B：** partial row block（不 pad 行 25→32）
-- **增量 C：** two_qlinearconv + fsim_nn
-- **增量 D：** onnx-mlir C++ 前端
-- **增量 E–G：** 更多算子 + LeNet-5 整网
+| 增量 | 状态 |
+|------|------|
+| B–C, E | ✅ 已落地 |
+| **F → G** | 🔄 见 [`phase4-increment-FG.md`](phase4-increment-FG.md) |
+| D（onnx-mlir） | ⏸ 暂缓 |

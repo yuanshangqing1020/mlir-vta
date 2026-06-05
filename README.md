@@ -15,9 +15,9 @@
 | 阶段二 | ✅ 完成（16×16 单块） | `linalg.matmul`(tensor) → tile/bufferize → `vta.gemm` → lower → translate → FSIM，结果矩阵与阶段一一致 |
 | 阶段三 | ✅ 完成（通用 GEMM·任意 16 倍数维 + 多层 + overfit strategy-1/2/3/4） | `vta.gemm` 放宽到 16 倍数维度；通用化 `lower-vta-gemm`（块调度 + 多块数据 + 逐块 STORE + 依赖位 + **页对齐地址分配**）；方阵 32×32、矩形 32×48×16、3×3 方阵 48×48×48 端到端字节级 + FSIM。**多层编译**：`-vta-dram-allocation`（跨层 base 递增）+ 逐层独立工件，两层 16×16 共 15 文件字节级对齐上游。**Overfit strategy-1/2/3/4**：`vta.gemm {strategy=N}` 属性，四种溢出调度策略全部字节级验收（S1:16×2064×16, S2:192×16×192, S3:2064×16×16, S4:16×16×2048） |
 
-| 阶段四 | 🔄 增量 A–C/E ✅ | 单层/两层 QLinearConv（col-pad + expand_bias + fsim_nn）；ReLU / MaxPool / QLinearMul / Conv+Relu fsim_nn Python 桥接 + 字节级黄金 |
+| 阶段四 | 🔄 增量 A–C/E ✅；**F→G 进行中** | Python 桥接 + VTA 算子已验收；**下一步 F（CPU 算子）→ G（LeNet-5 整网）**；增量 D（onnx-mlir）暂缓（本地未装 onnx-mlir） |
 
-尚未实现（后续增量）：onnx-mlir C++ 前端（D）、CPU 算子（F）、LeNet-5 整网（G）。
+**阶段四推进顺序（2026-06）：** F（QLinearAdd / Concat + `fsim_nn` 混合调度）→ G（LeNet-5 整网 `final_output.bin` vs `reference.bin`）→ D（待 onnx-mlir 环境就绪后替换 Python 桥接）。
 
 **阶段三增量**（均已落地）：`--vta-semaphore-derive`、ALU lowering、`fsim_nn` 2×16×16 GEMM 串联（256/256 一致）。
 
@@ -266,8 +266,11 @@ scripts/run_onnx_qconv_colpad.sh # 阶段四增量 B：col-pad + expand_bias QLi
 scripts/run_onnx_two_qconv.sh  # 阶段四增量 C：two_qlinearconv → fsim_nn
 scripts/run_onnx_relu.sh         # 阶段四增量 E：ReLU 16×16 MAX_IMM → vta.alu → 字节级 + FSIM
 scripts/run_onnx_maxpool.sh      # 阶段四增量 E：MaxPool 36×16 → vta.maxpool → 字节级 + FSIM
-scripts/run_onnx_qlinearmul.sh   # 阶段四增量 E：QLinearMul MulConstant → vta.gemm → 字节级
-scripts/run_onnx_conv_relu.sh    # 阶段四增量 E：Conv+Relu 两层 → fsim_nn
+scripts/run_onnx_qlinearmul.sh   # 阶段四增量 E：QLinearMul MulConstant → vta.gemm → 字节级 + FSIM
+scripts/run_onnx_conv_relu.sh    # 阶段四增量 E：Conv+Relu 两层 → fsim_nn + reference.bin 数值对比
+scripts/run_onnx_qadd_two_mul.sh # 阶段四增量 F-a：2×Mul + QLinearAdd → fsim_nn + 数值 golden
+scripts/run_onnx_qconcat.sh      # 阶段四增量 F-b：2×Conv + QLinearConcat → fsim_nn + 数值 golden
+scripts/run_onnx_lenet5.sh       # 阶段四增量 G：lenet5_mini 2×(Conv+Relu) → fsim_nn + 数值 golden
 ```
 
 ## 工程结构
