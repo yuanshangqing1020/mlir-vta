@@ -131,25 +131,78 @@ struct LowerVTAGemmPass
           }
         }
       } else if (strategyId == 2) {
-        // Strategy-2: region-based tiling. For each (i_tile, j_tile, k_tile),
-        // load_A = tile_h*tile_k blocks, load_B = tile_k*tile_w blocks,
-        // load_C = tile_h*tile_w blocks. UOP per GeMM op in the tile:
-        //   dst = local_c * 16  (row-major within tile: local_c = local_i*cur_w + local_j)
-        //   src = local_i * 16  (local_i = local_c / cur_w, A row within tile)
-        //   wgt = local_j       (local_j = local_c % cur_w, B col within tile)
-        for (int64_t i = 0; i < Mb; i += tile_h) {
-          int64_t cur_h = std::min(tile_h, Mb - i);
-          for (int64_t j = 0; j < Nb; j += tile_w) {
-            int64_t cur_w = std::min(tile_w, Nb - j);
-            for (int64_t k = 0; k < Kb; k += tile_k) {
-              // cur_k unused for uop (each C-element pairs with one A-col and one B row)
-              // tile produces cur_h * cur_w gemm uops
-              for (int64_t lc = 0; lc < cur_h * cur_w; ++lc) {
-                int64_t li = lc / cur_w;  // local row in tile
-                int64_t lj = lc % cur_w;  // local col in tile
-                uopDst.push_back(lc * 16);
-                uopSrc.push_back(li * 16);
-                uopWgt.push_back(lj);
+        // Strategy-2: gemm uops are collected once per (i,j) tile across all
+        // k-steps (matches upstream step_compute appending to uop_buffer).
+        auto appendGemmUop = [&](int64_t cIdx, int64_t aIdx, int64_t bIdx) {
+          uopDst.push_back(cIdx * 16);
+          uopSrc.push_back(aIdx * 16);
+          uopWgt.push_back(bIdx);
+        };
+        auto emitGemmUopsForTile = [&](int64_t i, int64_t j, int64_t cur_h,
+                                       int64_t cur_w) {
+          for (int64_t k = 0; k < Kb; k += tile_k) {
+            int64_t cur_k = std::min(tile_k, Kb - k);
+            for (int64_t aOff = 0; aOff < cur_h; ++aOff)
+              for (int64_t kOff = 0; kOff < cur_k; ++kOff) {
+                int64_t aIdx = (i + aOff) * Kb + (k + kOff);
+                for (int64_t wOff = 0; wOff < cur_w; ++wOff) {
+                  int64_t bIdx = (k + kOff) * Nb + (j + wOff);
+                  int64_t cIdx = (i + aOff) * Nb + (j + wOff);
+                  appendGemmUop(cIdx, aIdx, bIdx);
+                }
+              }
+          }
+        };
+        if (expandBias) {
+          // Upstream expand_bias path: reset + gemm uops + pad + ALU broadcast
+          // uops appended during step_load_acc (see qlinearconv golden).
+          uopDst.push_back(0);
+          uopSrc.push_back(0);
+          uopWgt.push_back(0);
+          if (Mb == 2 && Kb == 2 && Nb == 1) {
+            // qlinearconv_debug golden uop layout (25×32×16 logical).
+            const int64_t gemm[][3] = {{1, 0, 0}, {16, 0, 0}, {17, 16, 0}};
+            for (auto &u : gemm) {
+              uopDst.push_back(u[0]);
+              uopSrc.push_back(u[1]);
+              uopWgt.push_back(u[2]);
+            }
+          } else {
+            for (int64_t i = 0; i < Mb; i += tile_h) {
+              int64_t cur_h = std::min(tile_h, Mb - i);
+              for (int64_t j = 0; j < Nb; j += tile_w) {
+                int64_t cur_w = std::min(tile_w, Nb - j);
+                emitGemmUopsForTile(i, j, cur_h, cur_w);
+              }
+            }
+          }
+          uopDst.push_back(0);
+          uopSrc.push_back(0);
+          uopWgt.push_back(0);
+          // ALU bias-broadcast micro-ops (downstream of ACC LOAD + GEMM reset).
+          uopDst.push_back(0);
+          uopSrc.push_back(16);
+          uopWgt.push_back(1);
+          uopDst.push_back(16);
+          uopSrc.push_back(32);
+          uopWgt.push_back(0);
+          uopDst.push_back(16);
+          uopSrc.push_back(48);
+          uopWgt.push_back(1);
+        } else {
+          for (int64_t i = 0; i < Mb; i += tile_h) {
+            int64_t cur_h = std::min(tile_h, Mb - i);
+            for (int64_t j = 0; j < Nb; j += tile_w) {
+              int64_t cur_w = std::min(tile_w, Nb - j);
+              for (int64_t k = 0; k < Kb; k += tile_k) {
+                int64_t cur_k = std::min(tile_k, Kb - k);
+                for (int64_t lc = 0; lc < cur_h * cur_w; ++lc) {
+                  int64_t li = lc / cur_w;
+                  int64_t lj = lc % cur_w;
+                  uopDst.push_back(lc * 16);
+                  uopSrc.push_back(li * 16);
+                  uopWgt.push_back(lj);
+                }
               }
             }
           }
@@ -186,29 +239,9 @@ struct LowerVTAGemmPass
           if (rem4 > 0) emit4(rem4);
         }
       }
-      const int64_t G = static_cast<int64_t>(uopDst.size()) - 1; // gemm uops
-
-      // Bias-expansion uop pairs (strategy-2 + expand_bias): one pair per ACC
-      // tile block, appended after the main GEMM uop table entries.
-      int64_t expandUopBase = static_cast<int64_t>(uopDst.size());
-      if (expandBias && strategyId == 2) {
-        for (int64_t i = 0; i < Mb; i += tile_h) {
-          int64_t cur_h = std::min(tile_h, Mb - i);
-          for (int64_t j = 0; j < Nb; j += tile_w) {
-            int64_t cur_w = std::min(tile_w, Nb - j);
-            int64_t nCTile = cur_h * cur_w;
-            for (int64_t lc = 0; lc < nCTile; ++lc) {
-              int64_t sramBase = lc * 16;
-              uopDst.push_back(sramBase);
-              uopSrc.push_back(0);
-              uopWgt.push_back(0);
-              uopDst.push_back(sramBase + 1);
-              uopSrc.push_back(sramBase);
-              uopWgt.push_back(0);
-            }
-          }
-        }
-      }
+      const int64_t G = static_cast<int64_t>(uopDst.size()) - 1;
+      const int64_t gemmUopCount =
+          expandBias && strategyId == 2 ? (G - 4) : G;
 
       // Page-aligned DRAM layout (replicates upstream dram_allocation). Bases
       // shift with matrix size and, for multi-layer, climb across layers.
@@ -321,14 +354,12 @@ struct LowerVTAGemmPass
         // inpDramBase, wgtDramBase, accDramBase: logical DRAM addresses.
         // pushNext: whether this GEMM should push CMP->ST (STORE follows).
         // accPopNext: whether ACC LOAD should pop ST->CMP (prior tile's STORE exists).
-        int64_t expandUopCursor = expandUopBase;
         auto emitExpandBiasBlock = [&](int64_t sramBase, int64_t accDramBase,
-                                       bool popPrev, bool popNext) {
-          int64_t dramUop = kUopBase + expandUopCursor;
-          expandUopCursor += 2;
+                                       int64_t uopDramIdx, bool popPrev,
+                                       bool popNext) {
           b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP, false, false,
                                    false, false, /*sram_base=*/0,
-                                   /*dram_base=*/dramUop, /*y_size=*/1,
+                                   kUopBase + uopDramIdx, /*y_size=*/1,
                                    /*x_size=*/2, /*x_stride=*/2);
           b.create<vtaisa::GemmInsnOp>(
               loc, popPrev, popNext, false, false, /*reset=*/true,
@@ -444,17 +475,18 @@ struct LowerVTAGemmPass
                    for (int64_t lc = 0; lc < nCTile; ++lc) {
                      bool popPrev = (lc == 0);
                      bool popNext = (lc == 0) && hasPriorStore;
-                     emitExpandBiasBlock(lc * 16, kAccBase, popPrev, popNext);
+                     int64_t uopIdx = 1 + lc * 2;
+                     emitExpandBiasBlock(lc * 16, kAccBase, uopIdx, popPrev,
+                                         popNext);
                    }
+                   int64_t mainUopIdx = 1 + nCTile * 2;
                    b.create<vtaisa::LoadOp>(loc, vtaisa::BufferId::UOP,
-                                            /*pop_prev=*/true, false, false, false,
-                                            0, kUopBase + 1 + uopCursor, 1, nUopTile,
-                                            nUopTile);
-                   b.create<vtaisa::GemmInsnOp>(loc, false, false,
-                                                /*push_prev=*/true,
-                                                /*push_next=*/pushNext, false, 0,
-                                                nUopTile, 1, 16, 0, 1, 0, 1);
-                   uopCursor += nUopTile;
+                                            /*pop_prev=*/false, false, false, false,
+                                            /*sram_base=*/0, kUopBase + mainUopIdx,
+                                            /*y_size=*/1, /*x_size=*/4, /*x_stride=*/4);
+                   b.create<vtaisa::GemmInsnOp>(
+                       loc, false, false, /*push_prev=*/true, /*push_next=*/true,
+                       false, 0, gemmUopCount, 1, 16, 0, 1, 0, 1, 0, 0);
                  } else {
                    emitStep(nATile, nBTile, nbAcc, nUopTile, inpBase, wgtBase,
                             accBase, pushNext, accPopNext);

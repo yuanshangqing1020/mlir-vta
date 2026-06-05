@@ -86,6 +86,11 @@ PY
 cp "$OUT"/dependency.csv "$CO/dependency.csv"
 cp "$OUT"/layers_name.csv "$CO/layers_name.csv" 2>/dev/null || true
 
+# Per-layer unused add_accumulator channel (fsim_nn expects the file)
+for l in $($PY -c "import json; print(' '.join(x['name'] for x in json.load(open('$BR/bridge_meta.json'))['layers']))"); do
+  : > "$CO/add_accumulator${l}.bin"
+done
+
 # input_nn.bin from first layer int8 input
 cp "$BR/input_nchw_$(python3 -c "import json;print(json.load(open('$BR/bridge_meta.json'))['layers'][0]['name'])").bin" "$CO/input_nn.bin"
 
